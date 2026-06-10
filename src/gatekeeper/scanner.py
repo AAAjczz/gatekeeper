@@ -85,14 +85,14 @@ class Auditor:
 
             if "ports" in fn_name:
                 result = probe_fn(docker_path)
-            elif "cors" in fn_name or "no_auth" in fn_name or "model_permissions" in fn_name:
+            elif "no_auth" in fn_name:
+                result = probe_fn(self.endpoint)  # no auth check = no key needed
+            elif "cors" in fn_name or "model_permissions" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
-            elif "https" in fn_name:
+            elif "https" in fn_name or "security_headers" in fn_name:
                 result = probe_fn(self.endpoint)
             elif "exposed_admin" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
-            elif "security_headers" in fn_name:
-                result = probe_fn(self.endpoint)
             else:
                 continue
 
