@@ -345,7 +345,7 @@ class Reporter:
                 "tool": {
                     "driver": {
                         "name": "Gatekeeper",
-                        "version": "1.0.0",
+                        "version": "1.3.0",
                         "informationUri": "https://github.com/AAAjczz/gatekeeper",
                         "rules": list(rules.values()),
                     },

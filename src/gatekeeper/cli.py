@@ -11,7 +11,7 @@ from .reporter import Reporter
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="gatekeeper")
+@click.version_option(version="1.3.0", prog_name="gatekeeper")
 def main():
     """Gatekeeper — AI Infrastructure Security Auditor.
 
