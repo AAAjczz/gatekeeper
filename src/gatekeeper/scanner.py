@@ -115,7 +115,11 @@ class Auditor:
             elif "exposed_admin" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
             else:
-                continue
+                # Don't silently drop — crash with a clear message
+                raise TypeError(
+                    f"Network probe '{fn_name}' has no routing in scanner.py. "
+                    f"Add it to the if/elif chain in run_network_probes()."
+                )
 
             results.append(result)
             if self.verbose:

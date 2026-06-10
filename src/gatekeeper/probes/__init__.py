@@ -49,9 +49,18 @@ def _read_file(project_dir: str, name: str) -> str:
 
 
 def _is_env_gitignored(project_dir: str) -> bool:
-    """Check if .env is in .gitignore (the bare minimum)."""
+    """Check if .env is in .gitignore (line-by-line match, not substring)."""
     content = _read_file(project_dir, ".gitignore")
-    return ".env" in content
+    if not content:
+        return False
+    for line in content.splitlines():
+        stripped = line.strip()
+        # Skip comments and empty lines
+        if stripped.startswith("#") or not stripped:
+            continue
+        if stripped == ".env":
+            return True
+    return False
 
 
 # ============================================================
@@ -66,8 +75,9 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
     that should use ${ENV_VAR} references instead.
     """
     # Files that should NOT contain real keys (should use env var references)
+    # .env.example included: if real keys leak here, they get committed to git
     managed_files = ["config.yaml", "config.yml", "docker-compose.yml",
-                     "docker-compose.yaml"]
+                     "docker-compose.yaml", ".env.example"]
     # Patterns for real-looking API keys
     real_key_patterns = [
         r'sk-[a-zA-Z0-9]{15,60}',                # OpenAI/DeepSeek style
@@ -155,8 +165,10 @@ def check_secrets_env_leak(project_dir: str) -> AuditFinding:
         )
 
     content = _read_file(project_dir, ".gitignore")
-    has_dotenv = ".env" in content
-    has_env_wildcard = ".env.*" in content or "*.env" in content
+    lines = [l.strip() for l in content.splitlines()
+             if l.strip() and not l.strip().startswith("#")]
+    has_dotenv = any(l == ".env" for l in lines)
+    has_env_wildcard = any(l in (".env.*", "*.env") for l in lines)
 
     if not has_dotenv:
         return AuditFinding(
@@ -281,8 +293,26 @@ def check_access_no_auth(endpoint: str) -> AuditFinding:
     """Check if the API accepts requests without authentication."""
     try:
         import urllib.request
+        import urllib.error
         req = urllib.request.Request(f"{endpoint}/models", method="GET")
-        resp = urllib.request.urlopen(req, timeout=5)
+        try:
+            resp = urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError as e:
+            # 401/403 = auth required (good). Other codes = unclear.
+            if e.code in (401, 403):
+                return AuditFinding(
+                    id="ACC-002", name="Auth Required", category="access",
+                    severity="critical", passed=True,
+                    description=f"Endpoint correctly rejects unauthenticated requests (HTTP {e.code})",
+                )
+            return AuditFinding(
+                id="ACC-002", name="Auth Check Inconclusive", category="access",
+                severity="medium", passed=False,
+                description=f"Endpoint returned HTTP {e.code} without auth — unexpected, not conclusive",
+                detail=f"HTTP {e.code} is not 401/403. Could be a redirect, rate-limit, or misconfiguration.",
+                fix="Verify manually that auth is enforced across all API routes.",
+            )
+
         if resp.status == 200:
             return AuditFinding(
                 id="ACC-002",
@@ -295,19 +325,35 @@ def check_access_no_auth(endpoint: str) -> AuditFinding:
                 fix="Require Authorization header on all routes.\n"
                     "In LiteLLM: set LITELLM_MASTER_KEY and require_auth=true",
             )
+
+        # Non-200, non-401/403 — ambiguous
+        return AuditFinding(
+            id="ACC-002", name="Auth Check Inconclusive", category="access",
+            severity="medium", passed=False,
+            description=f"Endpoint returned HTTP {resp.status} without auth — not conclusive",
+            detail=f"HTTP {resp.status} — could be a redirect, rate-limit, or auth bypass.",
+            fix="Verify manually that auth is enforced across all API routes.",
+        )
     except Exception:
-        pass
-    return AuditFinding(
-        id="ACC-002", name="Auth Required", category="access",
-        severity="critical", passed=True,
-        description="Endpoint requires authentication",
-    )
+        return AuditFinding(
+            id="ACC-002", name="Auth Check Failed", category="access",
+            severity="info", passed=True,
+            description="Could not verify authentication (endpoint unreachable)",
+        )
 
 
 def check_access_model_permissions(endpoint: str, api_key: str) -> AuditFinding:
     """Check if all models are accessible without per-model key restrictions."""
     try:
         from openai import OpenAI
+    except ImportError:
+        return AuditFinding(
+            id="ACC-003", name="Model Access Control", category="access",
+            severity="info", passed=True,
+            description="Skipped — 'openai' package not installed (pip install openai)",
+        )
+
+    try:
         client = OpenAI(api_key=api_key, base_url=endpoint)
         models = client.models.list()
         model_ids = [m.id for m in models.data]
@@ -336,8 +382,12 @@ def check_access_model_permissions(endpoint: str, api_key: str) -> AuditFinding:
                 fix="Set per-model access with model-specific keys.\n"
                     "Separate cheap models from expensive ones (cost control).",
             )
-    except Exception:
-        pass
+    except Exception as e:
+        return AuditFinding(
+            id="ACC-003", name="Model Access Control", category="access",
+            severity="info", passed=True,
+            description=f"Could not verify model permissions: {e}",
+        )
     return AuditFinding(
         id="ACC-003", name="Model Access Control", category="access",
         severity="medium", passed=True,
@@ -385,7 +435,7 @@ def check_network_exposed_admin(endpoint: str, api_key: str) -> AuditFinding:
         for path in admin_paths:
             try:
                 req = urllib.request.Request(
-                    f"{endpoint.rstrip('/v1')}{path}",
+                    f"{endpoint.removesuffix('/v1')}{path}",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
                 resp = urllib.request.urlopen(req, timeout=3)
@@ -426,9 +476,15 @@ def check_network_ports(docker_compose_path: str) -> AuditFinding:
 
     # Find port mappings: "HOST:CONTAINER" or "IP:HOST:CONTAINER"
     # Formats: "4000:4000", "127.0.0.1:4000:4000", "${VAR:-4000}:4000"
-    # Strategy: extract quoted strings containing colons and digits,
+    # Also handle unquoted: 4000:4000 (valid YAML)
+    # Strategy: extract quoted AND unquoted port strings containing colons and digits,
     # split from the RIGHT at the last colon to get container port.
-    port_strings = re.findall(r'"([^"]*:\d+)"', content)
+    port_strings = re.findall(r'(?:"([^"]*:\d+)")|(?:^\s*- (\d+:\d+))', content, re.MULTILINE)
+    # Flatten: tuples from two capture groups
+    flat = []
+    for t in port_strings:
+        flat.append(t[0] or t[1])
+    port_strings = flat
 
     dangerous = []
     safe = 0
@@ -890,7 +946,7 @@ def check_secrets_key_strength(project_dir: str) -> AuditFinding:
         )
 
     key = key_match.group(1)
-    if len(key) < 16:
+    if len(key) < 32:
         return AuditFinding(
             id="SEC-004",
             name="Weak API Master Key",
@@ -898,7 +954,7 @@ def check_secrets_key_strength(project_dir: str) -> AuditFinding:
             severity="high",
             passed=False,
             description=f"Master key is only {len(key)} chars — brute-forceable",
-            detail=f"Key length: {len(key)} (minimum recommended: 32+)",
+            detail=f"Key length: {len(key)} (minimum recommended: 32)",
             fix="Generate a strong key:\n"
                 "  openssl rand -hex 32\n"
                 "Or use a password manager to generate a 64-char random string.",

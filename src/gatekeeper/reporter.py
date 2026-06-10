@@ -1,5 +1,6 @@
 """Report generation — terminal, JSON, and HTML output for infra audits."""
 
+import html
 import json
 from datetime import datetime
 
@@ -188,14 +189,14 @@ class Reporter:
         for f in self.findings:
             badge = '<span style="color:#22c55e">PASS</span>' if f.passed else '<span style="color:#ef4444">FAIL</span>'
             sev_c = {"critical": "#ef4444", "high": "#dc2626", "medium": "#eab308", "low": "#9ca3af", "info": "#6b7280"}.get(f.severity, "#9ca3af")
-            fix_html = f'<pre style="background:#0f172a;padding:0.5rem;border-radius:0.25rem;font-size:0.85em;white-space:pre-wrap">{f.fix}</pre>' if f.fix else ""
+            fix_html = f'<pre style="background:#0f172a;padding:0.5rem;border-radius:0.25rem;font-size:0.85em;white-space:pre-wrap">{html.escape(f.fix)}</pre>' if f.fix else ""
             rows += f"""
             <tr>
-                <td><code>{f.id}</code></td>
-                <td>{f.name}</td>
-                <td style="color:{sev_c};font-weight:bold">{f.severity.upper()}</td>
+                <td><code>{html.escape(f.id)}</code></td>
+                <td>{html.escape(f.name)}</td>
+                <td style="color:{sev_c};font-weight:bold">{html.escape(f.severity.upper())}</td>
                 <td>{badge}</td>
-                <td style="max-width:300px">{f.detail}{fix_html}</td>
+                <td style="max-width:300px">{html.escape(f.detail)}{fix_html}</td>
             </tr>"""
 
         html = f"""<!DOCTYPE html>
