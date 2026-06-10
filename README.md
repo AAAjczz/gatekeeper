@@ -93,6 +93,23 @@ gatekeeper audit -f all        # All three at once
 | Install | `pip install garak` | `npx promptfoo` | `pip install gatekeeper-ai` |
 | Backed by | NVIDIA | OpenAI (acquired) | Independent (MIT) |
 
+## Real-World Findings
+
+**DeepSeek API TLS certificate expires in 24 days (2026-07-04).**
+
+Found by `NET-004` (TLS certificate validation) during routine audit:
+
+```
+FAIL  NET-004 — TLS Certificate Expiring Soon
+       Certificate for api.deepseek.com expires in 24 days
+       Expires: 2026-07-04T23:59:59
+       Fix: Renew before expiry: certbot renew
+```
+
+This is a deployment-layer finding. garak (NVIDIA) tests model responses. promptfoo (OpenAI) tests code data flows. **Neither would catch an expiring TLS certificate.** Only gatekeeper would.
+
+The same scan confirmed `deepseek.com` (the marketing site) uses a different certificate (Amazon-issued, expires Dec 2026) — an ops inconsistency that only infrastructure-level auditing reveals.
+
 ## License
 
 MIT — audit everything. Built to pair with [chinai-gateway](https://github.com/AAAjczz/chinai-gateway).
