@@ -284,32 +284,59 @@ class Reporter:
             "info": "note",
         }
 
+        # Only report FAILED findings — passing checks are not security alerts
+        failed = [f for f in self.findings if not f.passed]
+
         rules = {}
         results_list = []
-        for f in self.findings:
+        for i, f in enumerate(failed):
             rule_id = f.id
             if rule_id not in rules:
                 rules[rule_id] = {
                     "id": rule_id,
                     "name": f.name,
                     "shortDescription": {"text": f.description},
-                    "help": {"text": f"Category: {f.category}\n\nFix:\n{f.fix}" if f.fix else f"Category: {f.category}"},
-                    "properties": {"category": f.category},
+                    "help": {
+                        "text": f"Risk: {f.risk_what or 'See details'}\n\n"
+                                f"How to fix:\n{f.fix}" if f.fix
+                                else f"Category: {f.category}",
+                    },
+                    "properties": {"category": f.category, "severity": f.severity},
                 }
+
             results_list.append({
                 "ruleId": rule_id,
                 "ruleIndex": list(rules.keys()).index(rule_id),
                 "level": sarif_severity.get(f.severity, "warning"),
-                "message": {"text": f.detail or f.description},
-                "kind": "fail" if not f.passed else "pass",
+                "message": {"text": f"{f.name}: {f.detail or f.description}"},
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": {
-                            "uri": ".gitignore",
+                            "uri": "docker-compose.yml",
                         },
                     },
                 }],
             })
+
+        if not failed:
+            sarif = {
+                "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.6.json",
+                "version": "2.1.0",
+                "runs": [{
+                    "tool": {
+                        "driver": {
+                            "name": "Gatekeeper",
+                            "version": "1.3.0",
+                            "informationUri": "https://github.com/AAAjczz/gatekeeper",
+                        },
+                    },
+                    "results": [],
+                }],
+            }
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(sarif, fh, indent=2, ensure_ascii=False)
+            print(f"SARIF report saved: {path} (no failures)")
+            return
 
         sarif = {
             "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.6.json",
