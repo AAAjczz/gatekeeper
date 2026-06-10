@@ -1,107 +1,98 @@
 # Gatekeeper
 
-> LLM API security scanner — red team your AI endpoints in one command.
+> AI Infrastructure Security Auditor — because your deployment has bugs your model scanner can't find.
 
-**17 probes across 6 categories.** Point it at any OpenAI-compatible API endpoint and get a security score with detailed pass/fail results in 30 seconds.
+**14 probes across 5 categories.** Point it at any AI API deployment directory
+and get a security score with specific fixes. Tests the INFRASTRUCTURE layer
+that garak, augustus, and promptfoo don't touch.
 
-## Why
+## Where Gatekeeper Fits
 
-- **Promptfoo was acquired by OpenAI** — vendor-neutral security testing needs independent tools
-- **LLM APIs are the new attack surface** — prompt injection, jailbreaking, data extraction
-- **Your gateway needs a gatekeeper** — built to pair with [chinai-gateway](https://github.com/AAAjczz/chinai-gateway)
+```
+AI Security Stack:
+├── Model Layer  → garak, augustus       (prompt injection, jailbreaks)
+├── Code Layer   → promptfoo             (data flow: prompt → LLM → sink)
+├── Deploy Layer → GATEKEEPER (this)     (docker, secrets, CORS, rate limits)
+└── Infra Layer  → your existing tools   (firewall, OS hardening)
+```
+
+Gatekeeper is the missing piece: deployment-level security for self-hosted AI APIs.
 
 ## Quick Start
 
 ```bash
 pip install -e .
 
-# Scan the default endpoint (chinai-gateway on localhost)
-gatekeeper scan
+# Audit a project directory
+gatekeeper audit -d /path/to/chinai-gateway
 
-# Scan any OpenAI-compatible API
-gatekeeper scan --endpoint https://api.deepseek.com/v1 -k YOUR_API_KEY
+# With network checks
+gatekeeper audit -d . -e http://localhost:4000/v1
 
-# Check connectivity first
-gatekeeper probe -e https://api.openai.com/v1 -k sk-xxx
+# Check what config files exist
+gatekeeper files -d .
 ```
 
 ## What It Tests
 
-| Category | Probes | What It Checks |
-|----------|--------|---------------|
-| **Injection** | 3 | Direct override, context switching, multi-shot injection |
-| **Jailbreak** | 3 | DAN, hypothetical framing, poetic evasion |
-| **Extraction** | 2 | System prompt extraction via formatting & emotional appeal |
-| **Leakage** | 2 | PII probing, token/model info disclosure |
-| **Evasion** | 3 | Base64 encoding, Unicode homoglyph, multi-language bypass |
-| **Boundary** | 2 | Malware generation, hate speech boundary testing |
-
-## Output Formats
-
-```bash
-# Terminal table (default)
-gatekeeper scan -f terminal
-
-# JSON report (for CI/CD)
-gatekeeper scan -f json -o ./reports
-
-# HTML report (for sharing)
-gatekeeper scan -f html -o ./reports
-
-# All formats
-gatekeeper scan -f all
-```
-
-## Exit Codes
-
-- `0` — no critical or high-severity failures
-- `1` — at least one critical or high-severity vulnerability found
-
-CI/CD friendly: fail your pipeline if the model is vulnerable.
+| Category | Checks | Examples |
+|----------|--------|----------|
+| **Secrets** | 3 | Hardcoded keys in config, .env in gitignore, default passwords |
+| **Access Control** | 3 | CORS wildcard, unauthenticated access, per-model permissions |
+| **Network** | 3 | HTTPS enforcement, exposed admin UI, public port bindings |
+| **Configuration** | 2 | Rate limiting, container resource limits |
+| **Deployment** | 3 | Root user (with mitigation detection), privileged mode, read-only rootfs |
 
 ## Example Output
 
 ```
-╭──────────────────────────────────────────╮
-│ Gatekeeper Scan Report                   │
-│                                          │
-│ Security Score: 82.4%                    │
-│ Endpoint: http://localhost:4000/v1       │
-│ Model: deepseek-chat                     │
-│ Passed: 14/17  Failed: 3/17              │
-│ Adequate — some probes require attention │
-╰──────────────────────────────────────────╯
++---------------------- Gatekeeper Infrastructure Audit ----------------------+
+| Security Score: 44.4%                                                       |
++----------------------------- 2026-06-10 21:13 ------------------------------+
+  Project:   /path/to/chinai-gateway
+  Passed:    4 / 9
+  Failed:    5 / 9
+  Serious issues — do not deploy publicly yet
 
 Results by Category
 ┌────────────┬────────┬───────┬──────┐
-│ Category   │ Passed │ Total │ Rate │
-├────────────┼────────┼───────┼──────┤
-│ injection  │      3 │     3 │ 100% │
-│ jailbreak  │      3 │     3 │ 100% │
-│ extraction │      1 │     2 │  50% │
-│ leakage    │      2 │     2 │ 100% │
-│ evasion    │      2 │     3 │  67% │
-│ boundary   │      3 │     4 │  75% │
+│ secrets    │      2 │     3 │  67% │
+│ network    │      1 │     1 │ 100% │
+│ config     │      0 │     2 │   0% │
+│ deployment │      1 │     3 │  33% │
 └────────────┴────────┴───────┴──────┘
+
+FAIL  SEC-002 — .env Variants Not Protected                    [MEDIUM]
+FAIL  CFG-001 — No Rate Limiting in Project Config             [HIGH]
+       If rate limiting is on external Nginx, add a note or nginx.conf
+       so CI tools can verify it.
+FAIL  DEP-001 — Running as Root — Partial Mitigations Present  [MEDIUM]
+       security_opt: no-new-privileges blocks escalation (+ user: recommended)
 ```
 
-## Integrating with chinai-gateway
+## Output Formats
 
-Add to `docker-compose.yml`:
-
-```yaml
-services:
-  gatekeeper:
-    image: python:3.11-slim
-    command: >
-      sh -c "pip install gatekeeper-ai &&
-             gatekeeper scan -e http://litellm:4000/v1 -f json -o /reports"
-    volumes:
-      - ./reports:/reports
-    depends_on:
-      - litellm
+```bash
+gatekeeper audit -f terminal   # Rich terminal table (default)
+gatekeeper audit -f json       # JSON for CI/CD pipelines
+gatekeeper audit -f html       # HTML for sharing
+gatekeeper audit -f all        # All three at once
 ```
+
+## Exit Codes
+
+- `0` — no critical or high-severity findings
+- `1` — at least one critical/high vulnerability found
+
+## Comparison
+
+| | garak | promptfoo | Gatekeeper |
+|---|---|---|---|
+| Scope | Model responses | Code data flow | Deployment config |
+| Tests | Jailbreaks, injection | Prompt→LLM→sink | Secrets, CORS, ports, limits |
+| Install | `pip install garak` | `npx promptfoo` | `pip install gatekeeper-ai` |
+| Backed by | NVIDIA | OpenAI (acquired) | Independent (MIT) |
 
 ## License
 
-MIT — use it, fork it, ship it.
+MIT — audit everything. Built to pair with [chinai-gateway](https://github.com/AAAjczz/chinai-gateway).

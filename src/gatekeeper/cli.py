@@ -1,43 +1,48 @@
-"""CLI entry point — gatekeeper scan."""
+"""CLI entry point — gatekeeper audit."""
 
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import click
 
-from .scanner import Scanner
+from .scanner import Auditor
 from .reporter import Reporter
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="gatekeeper")
+@click.version_option(version="0.2.0", prog_name="gatekeeper")
 def main():
-    """Gatekeeper — LLM API security scanner.
+    """Gatekeeper — AI Infrastructure Security Auditor.
 
-    Red-team your AI API endpoints in one command.
+    Audits your AI API DEPLOYMENT for misconfigurations:
+    hardcoded keys, missing CORS, exposed admin routes,
+    rate limiting gaps, privileged containers, and more.
+
+    This is NOT a model red-teaming tool (use garak/augustus for that).
+    This audits what THEY don't: docker-compose, .env, Nginx, CORS.
     """
     pass
 
 
 @main.command()
 @click.option(
-    "--endpoint", "-e",
-    default="http://localhost:4000/v1",
-    help="OpenAI-compatible API endpoint",
+    "--dir", "-d",
+    "project_dir",
+    default=".",
+    help="Project directory to audit (docker-compose.yml, .env, etc.)",
     show_default=True,
+)
+@click.option(
+    "--endpoint", "-e",
+    default=None,
+    help="API endpoint to check (network-level probes)",
 )
 @click.option(
     "--api-key", "-k",
     default="sk-test",
-    help="API key for the endpoint",
+    help="API key for endpoint auth checks",
     show_default=True,
-)
-@click.option(
-    "--model", "-m",
-    default=None,
-    help="Model name (auto-detect if not specified)",
 )
 @click.option(
     "--output", "-o",
@@ -55,37 +60,30 @@ def main():
 @click.option(
     "--verbose", "-v",
     is_flag=True,
-    help="Show each probe result as it runs",
+    help="Show each probe as it runs",
 )
-@click.option(
-    "--timeout", "-t",
-    default=30,
-    help="API request timeout in seconds",
-    show_default=True,
-)
-def scan(endpoint: str, api_key: str, model: str, output: str,
-         output_format: str, verbose: bool, timeout: int):
-    """Run a full security scan against an LLM endpoint.
+def audit(project_dir: str, endpoint: str, api_key: str,
+          output: str, output_format: str, verbose: bool):
+    """Audit an AI API deployment for security misconfigurations.
 
     \b
     Examples:
-      gatekeeper scan
-      gatekeeper scan --endpoint https://api.deepseek.com/v1 -k sk-xxx
-      gatekeeper scan -e http://localhost:4000/v1 -o ./reports -f all
+      gatekeeper audit
+      gatekeeper audit --dir /path/to/chinai-gateway
+      gatekeeper audit -d . -e http://localhost:4000/v1 -f all
     """
 
-    scanner = Scanner(
+    auditor = Auditor(
+        project_dir=project_dir,
         endpoint=endpoint,
         api_key=api_key,
-        model=model,
-        timeout=timeout,
         verbose=verbose,
     )
 
-    results = scanner.scan()
-    summary = scanner.summary(results)
+    findings = auditor.audit()
+    summary = auditor.summary(findings)
 
-    reporter = Reporter(results, summary)
+    reporter = Reporter(findings, summary)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
     if output_format in ("terminal", "all"):
@@ -94,19 +92,17 @@ def scan(endpoint: str, api_key: str, model: str, output: str,
     if output_format in ("json", "all"):
         out_dir = Path(output) if output else Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
-        json_path = out_dir / f"gatekeeper_{timestamp}.json"
-        reporter.json(str(json_path))
+        reporter.json(str(out_dir / f"gatekeeper_{timestamp}.json"))
 
     if output_format in ("html", "all"):
         out_dir = Path(output) if output else Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
-        html_path = out_dir / f"gatekeeper_{timestamp}.html"
-        reporter.html(str(html_path))
+        reporter.html(str(out_dir / f"gatekeeper_{timestamp}.html"))
 
     # Exit code: non-zero if critical/high failures found
     critical_high_fails = sum(
-        1 for r in results
-        if not r.passed and r.severity in ("critical", "high")
+        1 for f in findings
+        if not f.passed and f.severity in ("critical", "high")
     )
     if critical_high_fails > 0:
         sys.exit(1)
@@ -114,30 +110,28 @@ def scan(endpoint: str, api_key: str, model: str, output: str,
 
 @main.command()
 @click.option(
-    "--endpoint", "-e",
-    default="http://localhost:4000/v1",
-    help="OpenAI-compatible API endpoint",
+    "--dir", "-d",
+    "project_dir",
+    default=".",
+    help="Project directory to check",
 )
-@click.option(
-    "--api-key", "-k",
-    default="sk-test",
-    help="API key for the endpoint",
-)
-def probe(endpoint: str, api_key: str):
-    """Quick connectivity check — lists available models."""
-    from openai import OpenAI
+def files(project_dir: str):
+    """List all configuration files detected in the project directory."""
+    import os
 
-    try:
-        client = OpenAI(api_key=api_key, base_url=endpoint.rstrip("/"))
-        models = client.models.list()
-        print(f"Endpoint: {endpoint}")
-        print(f"Models available: {len(models.data)}")
-        for m in models.data:
-            print(f"  - {m.id}")
-    except Exception as e:
-        print(f"ERROR: Cannot connect to {endpoint}")
-        print(f"  {e}")
-        sys.exit(1)
+    print(f"Scanning: {os.path.abspath(project_dir)}\n")
+    patterns = [
+        "docker-compose.yml", "docker-compose.yaml",
+        ".env", ".env.example",
+        "config.yaml", "config.yml",
+        ".gitignore",
+        "nginx.conf", "Dockerfile",
+        "README.md",
+    ]
+    for pat in patterns:
+        path = os.path.join(project_dir, pat)
+        status = "✓" if os.path.isfile(path) else "✗"
+        print(f"  [{status}] {pat}")
 
 
 if __name__ == "__main__":
