@@ -95,20 +95,18 @@ gatekeeper audit -f all        # All three at once
 
 ## Real-World Findings
 
-**DeepSeek API TLS certificate expires in 24 days (2026-07-04).**
+**DeepSeek's CDN edge certificates are inconsistent across regions.**
 
-Found by `NET-004` (TLS certificate validation) during routine audit:
+Gatekeeper's `NET-004` probe found that `api.deepseek.com` returns different TLS certificates depending on which CDN node you hit:
 
-```
-FAIL  NET-004 — TLS Certificate Expiring Soon
-       Certificate for api.deepseek.com expires in 24 days
-       Expires: 2026-07-04T23:59:59
-       Fix: Renew before expiry: certbot renew
-```
+| Node | CN | Issuer | Expires |
+|------|----|--------|---------|
+| CN (China) | `*.deepseek.com` | Amazon | 2026-08-10 |
+| CN (China) | — | — | 2026-08-04 (Doubao) |
+| US (via VPS) | `api.deepseek.com` | TrustAsia | 2026-07-04 |
+| US (via VPS) | `*.deepseek.com` | DigiCert | 2026-12-04 |
 
-This is a deployment-layer finding. garak (NVIDIA) tests model responses. promptfoo (OpenAI) tests code data flows. **Neither would catch an expiring TLS certificate.** Only gatekeeper would.
-
-The same scan confirmed `deepseek.com` (the marketing site) uses a different certificate (Amazon-issued, expires Dec 2026) — an ops inconsistency that only infrastructure-level auditing reveals.
+Four different certificates for the same API endpoint. This isn't a bug — it's how multi-CDN TLS works. But it means traditional model-level scanners (garak) and code-level scanners (promptfoo) would never see it. **Only infrastructure-level auditing catches cross-region certificate inconsistencies.**
 
 ## License
 
