@@ -302,6 +302,13 @@ class Reporter:
                 "level": sarif_severity.get(f.severity, "warning"),
                 "message": {"text": f.detail or f.description},
                 "kind": "fail" if not f.passed else "pass",
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": {
+                            "uri": "gatekeeper-audit://deployment-check",
+                        },
+                    },
+                }],
             })
 
         sarif = {
