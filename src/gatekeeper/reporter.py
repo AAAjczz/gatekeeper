@@ -305,7 +305,7 @@ class Reporter:
                 "locations": [{
                     "physicalLocation": {
                         "artifactLocation": {
-                            "uri": "gatekeeper-audit://deployment-check",
+                            "uri": ".gitignore",
                         },
                     },
                 }],
