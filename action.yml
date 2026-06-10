@@ -1,0 +1,85 @@
+name: Gatekeeper Security Audit
+description: Scan your AI API deployment for infrastructure security issues
+author: AAAjczz
+branding:
+  icon: shield
+  color: green
+
+inputs:
+  project_dir:
+    description: Path to project directory to audit
+    required: false
+    default: "."
+  endpoint:
+    description: API endpoint to check (network probes)
+    required: false
+    default: ""
+  api_key:
+    description: API key for endpoint auth checks
+    required: false
+    default: ""
+  min_severity:
+    description: Minimum severity to report (critical, high, medium, low, info)
+    required: false
+    default: "low"
+
+outputs:
+  score:
+    description: Security score (0-100)
+    value: ${{ steps.audit.outputs.score }}
+  passed:
+    description: Number of passed checks
+    value: ${{ steps.audit.outputs.passed }}
+  failed:
+    description: Number of failed checks
+    value: ${{ steps.audit.outputs.failed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install Gatekeeper
+      shell: bash
+      run: pip install gatekeeper-audit
+
+    - name: Run Audit
+      id: audit
+      shell: bash
+      env:
+        GATEKEEPER_ENDPOINT: ${{ inputs.endpoint }}
+        GATEKEEPER_API_KEY: ${{ inputs.api_key }}
+      run: |
+        ARGS="-d ${{ inputs.project_dir }}"
+        if [ -n "$GATEKEEPER_ENDPOINT" ]; then
+          ARGS="$ARGS -e $GATEKEEPER_ENDPOINT"
+        fi
+        if [ -n "$GATEKEEPER_API_KEY" ]; then
+          ARGS="$ARGS -k $GATEKEEPER_API_KEY"
+        fi
+
+        # Run audit, capture exit code
+        python -m gatekeeper.cli audit $ARGS -f sarif -o . || true
+
+        # Parse SARIF for summary
+        SARIF=$(ls gatekeeper_*.sarif 2>/dev/null | head -1)
+        if [ -n "$SARIF" ]; then
+          FAILED=$(python -c "
+import json
+with open('$SARIF') as f:
+    data = json.load(f)
+results = data.get('runs', [{}])[0].get('results', [])
+print(len(results))
+")
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+        else
+          echo "failed=0" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload to GitHub Code Scanning
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: gatekeeper_*.sarif
