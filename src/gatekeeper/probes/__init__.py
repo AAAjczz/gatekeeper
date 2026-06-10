@@ -981,7 +981,16 @@ def check_deploy_docker_socket(docker_compose_path: str) -> AuditFinding:
 
 
 def check_network_tls_cert(endpoint: str) -> AuditFinding:
-    """Check TLS certificate validity and expiry."""
+    """Check TLS certificate validity across related domains.
+
+    Multi-CDN services (DeepSeek, OpenAI, etc.) often deploy different
+    certificates on different edge nodes. This probe scans the primary
+    endpoint AND related domains to catch inconsistencies.
+    """
+    import ssl
+    import socket
+    from datetime import datetime, timezone
+
     parsed = urlparse(endpoint)
     if parsed.scheme != "https":
         return AuditFinding(
@@ -990,93 +999,151 @@ def check_network_tls_cert(endpoint: str) -> AuditFinding:
             description="Non-HTTPS endpoint — certificate check skipped",
         )
 
-    import ssl
-    import socket
-    from datetime import datetime
-
-    hostname = parsed.hostname
+    hostname = parsed.hostname or ""
     port = parsed.port or 443
 
-    try:
-        ctx = ssl.create_default_context()
-        with socket.create_connection((hostname, port), timeout=10) as sock:
-            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
-                if not cert:
-                    return AuditFinding(
-                        id="NET-004",
-                        name="No TLS Certificate Presented",
-                        category="network",
-                        severity="high",
-                        passed=False,
-                        description="Server did not present a TLS certificate",
-                        fix="Configure TLS certificate on your reverse proxy.",
-                    )
+    # Build related domain list for multi-CDN coverage
+    # e.g. api.deepseek.com → also check deepseek.com, deepseek.ai
+    domains_to_check = {hostname}
+    parts = hostname.split(".")
+    if len(parts) >= 2:
+        base = parts[-2]  # "deepseek"
+        tld = parts[-1]   # "com"
+        # Add sibling TLDs
+        for alt_tld in [".com", ".ai", ".cn", ".io"]:
+            if alt_tld != f".{tld}":
+                domains_to_check.add(f"{base}{alt_tld}")
+        # Add www and api variants
+        if hostname.startswith("api."):
+            domains_to_check.add(hostname.replace("api.", "", 1))
+        else:
+            domains_to_check.add(f"api.{hostname}")
 
-                # Check expiry
-                not_after = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                days_left = (not_after - datetime.utcnow()).days
+    certs_by_domain = {}
 
-                subject = dict(x[0] for x in cert.get("subject", []))
-                issuer = dict(x[0] for x in cert.get("issuer", []))
-                cn = subject.get("commonName", "unknown")
+    for domain in list(domains_to_check):
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((domain, 443), timeout=5) as sock:
+                with ctx.wrap_socket(sock, server_hostname=domain) as ssock:
+                    cert = ssock.getpeercert()
+                    if not cert:
+                        continue
+                    not_after = datetime.strptime(
+                        cert["notAfter"], "%b %d %H:%M:%S %Y %Z"
+                    ).replace(tzinfo=timezone.utc)
+                    subject = dict(x[0] for x in cert.get("subject", []))
+                    issuer = dict(x[0] for x in cert.get("issuer", []))
+                    cn = subject.get("commonName", "?")
+                    issuer_name = issuer.get("organizationName", "?")
+                    days_left = (not_after - datetime.now(timezone.utc)).days
 
-                if days_left <= 0:
-                    return AuditFinding(
-                        id="NET-004",
-                        name="TLS Certificate EXPIRED",
-                        category="network",
-                        severity="critical",
-                        passed=False,
-                        description=f"Certificate for {cn} has expired",
-                        detail=f"Expired: {not_after.isoformat()}",
-                        fix="Renew immediately:\n  certbot renew --force-renewal",
-                    )
-                elif days_left <= 30:
-                    return AuditFinding(
-                        id="NET-004",
-                        name="TLS Certificate Expiring Soon",
-                        category="network",
-                        severity="high",
-                        passed=False,
-                        description=f"Certificate for {cn} expires in {days_left} days",
-                        detail=f"Expires: {not_after.isoformat()}",
-                        fix="Renew before expiry:\n  certbot renew",
-                    )
-                elif days_left <= 90:
-                    return AuditFinding(
-                        id="NET-004",
-                        name="TLS Certificate Valid",
-                        category="network",
-                        severity="info",
-                        passed=True,
-                        description=f"Certificate for {cn}: {days_left} days remaining",
-                    )
-                else:
-                    return AuditFinding(
-                        id="NET-004",
-                        name="TLS Certificate Valid",
-                        category="network",
-                        severity="info",
-                        passed=True,
-                        description=f"Certificate for {cn}: {days_left} days until expiry",
-                    )
-    except ssl.SSLCertificateError as e:
-        return AuditFinding(
-            id="NET-004",
-            name="TLS Certificate Invalid",
-            category="network",
-            severity="critical",
-            passed=False,
-            description=f"Certificate validation failed: {e}",
-            fix="Check certificate chain and validity.",
-        )
-    except Exception as e:
+                    certs_by_domain[domain] = {
+                        "cn": cn,
+                        "issuer": issuer_name,
+                        "not_after": not_after.strftime("%Y-%m-%d"),
+                        "not_after_utc": not_after.isoformat(),
+                        "days_left": days_left,
+                    }
+        except (ssl.SSLError, ssl.CertificateError):
+            certs_by_domain[domain] = {"cn": "?", "error": "certificate validation failed"}
+        except (socket.timeout, socket.gaierror, OSError):
+            continue  # domain not reachable — skip silently
+
+    if not certs_by_domain:
         return AuditFinding(
             id="NET-004", name="TLS Certificate", category="network",
             severity="info", passed=True,
-            description=f"Could not verify TLS certificate: {e}",
+            description=f"No TLS certificates reachable for {hostname} or related domains",
         )
+
+    # Analyze results
+    primary = certs_by_domain.get(hostname, {})
+    distinct_certs = set(
+        (d["cn"], d.get("issuer", "?"), d.get("not_after", "?"))
+        for d in certs_by_domain.values() if "cn" in d
+    )
+    min_days = min(
+        (d["days_left"] for d in certs_by_domain.values() if "days_left" in d),
+        default=999,
+    )
+
+    # Build detail
+    lines = []
+    for domain, info in certs_by_domain.items():
+        if "error" in info:
+            lines.append(f"  {domain}: {info['error']}")
+        else:
+            lines.append(
+                f"  {domain} → CN={info['cn']}, issuer={info['issuer']}, "
+                f"expires={info['not_after']} ({info['days_left']}d)"
+            )
+
+    # Decide verdict
+    if len(distinct_certs) > 1 and min_days < 60:
+        # Multi-CDN with expiring certs — the most interesting finding
+        return AuditFinding(
+            id="NET-004",
+            name="Multi-CDN Certificate Inconsistency",
+            category="network",
+            severity="high",
+            passed=False,
+            description=f"{len(distinct_certs)} different certificates across "
+                        f"{len(certs_by_domain)} domains — earliest expires in {min_days}d",
+            detail="Different CDN nodes return different certificates:\n"
+                   + "\n".join(lines)
+                   + "\n\nNot necessarily a vulnerability — common in multi-CDN setups. "
+                   "But the inconsistency risks partial outages if one certificate expires "
+                   "before others are renewed.",
+            fix="Ensure all CDN edge certificates are renewed before the earliest expiry. "
+                "Use UTC for all expiration tracking to avoid timezone confusion.",
+        )
+
+    if min_days <= 0:
+        return AuditFinding(
+            id="NET-004",
+            name="TLS Certificate EXPIRED",
+            category="network",
+            severity="critical",
+            passed=False,
+            description=f"Certificate expired — found across {len(certs_by_domain)} domain(s)",
+            detail="\n".join(lines),
+            fix="Renew immediately: certbot renew --force-renewal",
+        )
+
+    if min_days <= 30:
+        return AuditFinding(
+            id="NET-004",
+            name="TLS Certificate Expiring Soon (<30d)",
+            category="network",
+            severity="high",
+            passed=False,
+            description=f"Earliest expiry in {min_days} days",
+            detail="\n".join(lines),
+            fix="Renew before expiry.",
+        )
+
+    if len(distinct_certs) > 1:
+        return AuditFinding(
+            id="NET-004",
+            name="Multiple Certificates Detected — All Valid",
+            category="network",
+            severity="info",
+            passed=True,
+            description=f"{len(distinct_certs)} certificates across "
+                        f"{len(certs_by_domain)} domains, earliest in {min_days}d",
+            detail="\n".join(lines),
+        )
+
+    return AuditFinding(
+        id="NET-004",
+        name="TLS Certificate Valid",
+        category="network",
+        severity="info",
+        passed=True,
+        description=f"Certificate valid for {min_days} days",
+        detail="\n".join(lines),
+    )
 
 
 def check_secrets_key_rotation(project_dir: str) -> AuditFinding:

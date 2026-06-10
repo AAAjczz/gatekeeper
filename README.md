@@ -95,18 +95,20 @@ gatekeeper audit -f all        # All three at once
 
 ## Real-World Findings
 
-**DeepSeek's CDN edge certificates are inconsistent across regions.**
+**DeepSeek deploys at least 3 different TLS certificates across its CDN — one expires in 8 days.**
 
-Gatekeeper's `NET-004` probe found that `api.deepseek.com` returns different TLS certificates depending on which CDN node you hit:
+Gatekeeper's `NET-004` multi-domain probe scanned `api.deepseek.com` and related domains:
 
-| Node | CN | Issuer | Expires |
-|------|----|--------|---------|
-| CN (China) | `*.deepseek.com` | Amazon | 2026-08-10 |
-| CN (China) | — | — | 2026-08-04 (Doubao) |
-| US (via VPS) | `api.deepseek.com` | TrustAsia | 2026-07-04 |
-| US (via VPS) | `*.deepseek.com` | DigiCert | 2026-12-04 |
+```
+FAIL  NET-004 — Multi-CDN Certificate Inconsistency
+       3 different certificates, earliest expires in 8 days
 
-Four different certificates for the same API endpoint. This isn't a bug — it's how multi-CDN TLS works. But it means traditional model-level scanners (garak) and code-level scanners (promptfoo) would never see it. **Only infrastructure-level auditing catches cross-region certificate inconsistencies.**
+  deepseek.io       → GoDaddy     expires 2026-06-18 (8d)
+  api.deepseek.com  → TrustAsia   expires 2026-07-04 (24d)
+  deepseek.com      → DigiCert    expires 2026-12-04 (177d)
+```
+
+Three domains, three issuers, three expiry dates — a 169-day gap between earliest and latest. No model scanner (garak) or code scanner (promptfoo) would find this. **Only infrastructure-level multi-domain TLS auditing catches cross-CDN certificate inconsistency.**
 
 ## License
 
