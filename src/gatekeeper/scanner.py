@@ -8,6 +8,9 @@ rate limiting, access control, network exposure.
 import os
 from typing import Optional
 
+import yaml
+from yaml import YAMLError
+
 from .probes import (
     FILE_PROBES,
     NETWORK_PROBES,
@@ -15,6 +18,21 @@ from .probes import (
     NETWORK_PROBE_COUNT,
     AuditFinding,
 )
+
+SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+
+def _load_gatekeeper_config(project_dir: str) -> dict:
+    """Load .gatekeeper.yaml config file if it exists."""
+    config_path = os.path.join(project_dir, ".gatekeeper.yaml")
+    if not os.path.isfile(config_path):
+        return {}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg
+    except YAMLError:
+        return {}
 
 
 class Auditor:
@@ -31,6 +49,9 @@ class Auditor:
         self.endpoint = endpoint.rstrip("/") if endpoint else None
         self.api_key = api_key or "sk-test"
         self.verbose = verbose
+
+        # Load user config
+        self.config = _load_gatekeeper_config(self.project_dir)
 
         # Resolve common config file paths
         self.docker_compose = self._find_file(["docker-compose.yml", "docker-compose.yaml"])
@@ -86,10 +107,10 @@ class Auditor:
             if "ports" in fn_name:
                 result = probe_fn(docker_path)
             elif "no_auth" in fn_name:
-                result = probe_fn(self.endpoint)  # no auth check = no key needed
+                result = probe_fn(self.endpoint)
             elif "cors" in fn_name or "model_permissions" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
-            elif "https" in fn_name or "security_headers" in fn_name:
+            elif "https" in fn_name or "security_headers" in fn_name or "tls_cert" in fn_name:
                 result = probe_fn(self.endpoint)
             elif "exposed_admin" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
@@ -105,10 +126,26 @@ class Auditor:
         return results
 
     def audit(self) -> list[AuditFinding]:
-        """Run full audit — file checks + network checks if endpoint provided."""
+        """Run full audit — file checks + network checks if endpoint provided.
+
+        Filters results based on .gatekeeper.yaml config:
+        - ignore: list of probe IDs to skip
+        - min_severity: minimum severity level to report (critical > high > medium > low > info)
+        """
         results = self.run_file_probes()
         if self.endpoint:
             results.extend(self.run_network_probes())
+
+        # Apply .gatekeeper.yaml filters
+        if self.config:
+            ignore_ids = self.config.get("ignore", [])
+            if ignore_ids:
+                results = [r for r in results if r.id not in ignore_ids]
+
+            min_sev = self.config.get("min_severity", "info")
+            min_rank = SEVERITY_RANK.get(min_sev.lower(), 0)
+            results = [r for r in results if SEVERITY_RANK.get(r.severity, 0) >= min_rank]
+
         return results
 
     def summary(self, results: list[AuditFinding]) -> dict:

@@ -943,6 +943,185 @@ def check_access_security_headers(endpoint: str) -> AuditFinding:
         )
 
 
+def check_deploy_docker_socket(docker_compose_path: str) -> AuditFinding:
+    """Check if Docker socket is mounted into containers (container escape risk)."""
+    if not os.path.isfile(docker_compose_path):
+        return AuditFinding(
+            id="DEP-007", name="Docker Socket Exposure", category="deployment",
+            severity="info", passed=True,
+            description="No docker-compose.yml found to check",
+        )
+
+    content = _read_file(os.path.dirname(docker_compose_path),
+                         os.path.basename(docker_compose_path))
+
+    # Check for docker socket mount
+    socket_patterns = [
+        r'/var/run/docker\.sock',
+        r'/run/docker\.sock',
+    ]
+    for pat in socket_patterns:
+        if pat in content:
+            return AuditFinding(
+                id="DEP-007",
+                name="Docker Socket Mounted in Container",
+                category="deployment",
+                severity="critical",
+                passed=False,
+                description="Container can access host Docker daemon — trivial escape to root",
+                detail=f"Found: {pat} mounted as volume",
+                fix="NEVER mount docker.sock unless absolutely required.\n"
+                    "If needed for healthchecks, use docker-exec or HTTP health endpoints instead.",
+            )
+    return AuditFinding(
+        id="DEP-007", name="Docker Socket Not Exposed", category="deployment",
+        severity="critical", passed=True,
+        description="Docker socket not mounted in containers",
+    )
+
+
+def check_network_tls_cert(endpoint: str) -> AuditFinding:
+    """Check TLS certificate validity and expiry."""
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "https":
+        return AuditFinding(
+            id="NET-004", name="TLS Certificate", category="network",
+            severity="info", passed=True,
+            description="Non-HTTPS endpoint — certificate check skipped",
+        )
+
+    import ssl
+    import socket
+    from datetime import datetime
+
+    hostname = parsed.hostname
+    port = parsed.port or 443
+
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((hostname, port), timeout=10) as sock:
+            with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
+                cert = ssock.getpeercert()
+                if not cert:
+                    return AuditFinding(
+                        id="NET-004",
+                        name="No TLS Certificate Presented",
+                        category="network",
+                        severity="high",
+                        passed=False,
+                        description="Server did not present a TLS certificate",
+                        fix="Configure TLS certificate on your reverse proxy.",
+                    )
+
+                # Check expiry
+                not_after = datetime.strptime(cert["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                days_left = (not_after - datetime.utcnow()).days
+
+                subject = dict(x[0] for x in cert.get("subject", []))
+                issuer = dict(x[0] for x in cert.get("issuer", []))
+                cn = subject.get("commonName", "unknown")
+
+                if days_left <= 0:
+                    return AuditFinding(
+                        id="NET-004",
+                        name="TLS Certificate EXPIRED",
+                        category="network",
+                        severity="critical",
+                        passed=False,
+                        description=f"Certificate for {cn} has expired",
+                        detail=f"Expired: {not_after.isoformat()}",
+                        fix="Renew immediately:\n  certbot renew --force-renewal",
+                    )
+                elif days_left <= 30:
+                    return AuditFinding(
+                        id="NET-004",
+                        name="TLS Certificate Expiring Soon",
+                        category="network",
+                        severity="high",
+                        passed=False,
+                        description=f"Certificate for {cn} expires in {days_left} days",
+                        detail=f"Expires: {not_after.isoformat()}",
+                        fix="Renew before expiry:\n  certbot renew",
+                    )
+                elif days_left <= 90:
+                    return AuditFinding(
+                        id="NET-004",
+                        name="TLS Certificate Valid",
+                        category="network",
+                        severity="info",
+                        passed=True,
+                        description=f"Certificate for {cn}: {days_left} days remaining",
+                    )
+                else:
+                    return AuditFinding(
+                        id="NET-004",
+                        name="TLS Certificate Valid",
+                        category="network",
+                        severity="info",
+                        passed=True,
+                        description=f"Certificate for {cn}: {days_left} days until expiry",
+                    )
+    except ssl.SSLCertificateError as e:
+        return AuditFinding(
+            id="NET-004",
+            name="TLS Certificate Invalid",
+            category="network",
+            severity="critical",
+            passed=False,
+            description=f"Certificate validation failed: {e}",
+            fix="Check certificate chain and validity.",
+        )
+    except Exception as e:
+        return AuditFinding(
+            id="NET-004", name="TLS Certificate", category="network",
+            severity="info", passed=True,
+            description=f"Could not verify TLS certificate: {e}",
+        )
+
+
+def check_secrets_key_rotation(project_dir: str) -> AuditFinding:
+    """Check for key rotation documentation or automation."""
+    # Look for rotation hints: scripts, docs, comments
+    rotation_keywords = [
+        "key rotation", "rotate keys", "key rotation policy",
+        "ROTATION", "rotating keys", "rotation schedule",
+    ]
+
+    search_files = [".env", ".env.example", "README.md", "SECURITY.md",
+                    "docker-compose.yml", "Makefile", "scripts/", "docs/"]
+
+    found_rotation = False
+    for fname in search_files:
+        fpath = os.path.join(project_dir, fname)
+        if os.path.isdir(fpath):
+            continue
+        content = _read_file(project_dir, fname)
+        if not content:
+            continue
+        if any(kw in content.lower() for kw in rotation_keywords):
+            found_rotation = True
+            break
+
+    if not found_rotation:
+        return AuditFinding(
+            id="SEC-005",
+            name="No Key Rotation Documentation",
+            category="secrets",
+            severity="medium",
+            passed=False,
+            description="No key rotation policy or instructions found",
+            detail="API keys that are never rotated accumulate risk over time",
+            fix="Add a SECURITY.md or comment in .env:\n"
+                "  # Key rotation schedule: rotate every 90 days\n"
+                "  # Last rotated: 2026-06-10",
+        )
+    return AuditFinding(
+        id="SEC-005", name="Key Rotation Policy Found", category="secrets",
+        severity="medium", passed=True,
+        description="Key rotation documentation detected",
+    )
+
+
 # ============================================================
 # Probe registry
 # ============================================================
@@ -953,6 +1132,7 @@ FILE_PROBES = [
     check_secrets_env_leak,
     check_secrets_default_keys,
     check_secrets_key_strength,
+    check_secrets_key_rotation,
     check_network_ports,
     check_config_rate_limiting,
     check_config_resource_limits,
@@ -963,6 +1143,7 @@ FILE_PROBES = [
     check_deploy_image_pinning,
     check_deploy_healthcheck,
     check_deploy_restart_policy,
+    check_deploy_docker_socket,
 ]
 
 # Network-based probes (need endpoint + API key)
@@ -972,6 +1153,7 @@ NETWORK_PROBES = [
     check_access_model_permissions,
     check_access_security_headers,
     check_network_https,
+    check_network_tls_cert,
     check_network_exposed_admin,
 ]
 

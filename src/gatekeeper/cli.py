@@ -52,7 +52,7 @@ def main():
 @click.option(
     "--format", "-f",
     "output_format",
-    type=click.Choice(["terminal", "json", "html", "all"]),
+    type=click.Choice(["terminal", "json", "html", "sarif", "all"]),
     default="terminal",
     help="Output format",
     show_default=True,
@@ -98,6 +98,11 @@ def audit(project_dir: str, endpoint: str, api_key: str,
         out_dir = Path(output) if output else Path("reports")
         out_dir.mkdir(parents=True, exist_ok=True)
         reporter.html(str(out_dir / f"gatekeeper_{timestamp}.html"))
+
+    if output_format in ("sarif", "all"):
+        out_dir = Path(output) if output else Path("reports")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        reporter.sarif(str(out_dir / f"gatekeeper_{timestamp}.sarif"))
 
     # Exit code: non-zero if critical/high failures found
     critical_high_fails = sum(

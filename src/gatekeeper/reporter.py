@@ -231,3 +231,58 @@ class Reporter:
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(html)
         print(f"HTML report saved: {path}")
+
+    def sarif(self, path: str):
+        """Write SARIF (Static Analysis Results Interchange Format) report.
+
+        Compatible with GitHub code scanning — upload to see results in
+        the Security tab and on PR diffs.
+        """
+        sarif_severity = {
+            "critical": "error",
+            "high": "error",
+            "medium": "warning",
+            "low": "warning",
+            "info": "note",
+        }
+
+        rules = {}
+        results_list = []
+        for f in self.findings:
+            rule_id = f.id
+            if rule_id not in rules:
+                rules[rule_id] = {
+                    "id": rule_id,
+                    "name": f.name,
+                    "shortDescription": {"text": f.description},
+                    "help": {"text": f"Category: {f.category}\n\nFix:\n{f.fix}" if f.fix else f"Category: {f.category}"},
+                    "properties": {"category": f.category},
+                }
+            results_list.append({
+                "ruleId": rule_id,
+                "ruleIndex": list(rules.keys()).index(rule_id),
+                "level": sarif_severity.get(f.severity, "warning"),
+                "message": {"text": f.detail or f.description},
+                "kind": "fail" if not f.passed else "pass",
+            })
+
+        sarif = {
+            "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.6.json",
+            "version": "2.1.0",
+            "runs": [{
+                "tool": {
+                    "driver": {
+                        "name": "Gatekeeper",
+                        "version": "1.0.0",
+                        "informationUri": "https://github.com/AAAjczz/gatekeeper",
+                        "rules": list(rules.values()),
+                    },
+                },
+                "results": results_list,
+            }],
+        }
+
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(sarif, fh, indent=2, ensure_ascii=False)
+        print(f"SARIF report saved: {path}")
+        print("  Upload to GitHub: actions/upload-sarif@v1")
