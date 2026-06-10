@@ -80,7 +80,7 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
                      "docker-compose.yaml", ".env.example"]
     # Patterns for real-looking API keys
     real_key_patterns = [
-        r'sk-[a-zA-Z0-9]{15,60}',                # OpenAI/DeepSeek style
+        r'sk-[a-zA-Z0-9\-_]{15,100}',             # OpenAI/DeepSeek style (project keys can be 80+)
         r'api_key\s*[:=]\s*["\'][a-zA-Z0-9\-_]{20,}["\']',  # literal key values
         r'password\s*[:=]\s*["\'](?!\$\{|\$)[^"\'$]{4,}["\']',  # plaintext pwd (not env ref)
     ]
@@ -93,7 +93,7 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
         for pat in real_key_patterns:
             matches = re.findall(pat, content, re.IGNORECASE)
             for m in matches[:2]:
-                masked = m[:8] + "***" + m[-4:] if len(m) > 14 else "***"
+                masked = m[:3] + "***" + m[-3:] if len(m) > 10 else "***"
                 findings.append(f"  {fname}: {masked}")
 
     if findings:
@@ -123,7 +123,7 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
                                     env_content, re.IGNORECASE))
         if key_count > 0:
             return AuditFinding(
-                id="SEC-001",
+                id="SEC-001B",
                 name="Secrets in .env — NOT Git-Ignored",
                 category="secrets",
                 severity="critical",
@@ -257,19 +257,51 @@ def check_access_cors(endpoint: str, api_key: str) -> AuditFinding:
     """Check if CORS is properly restricted."""
     try:
         import urllib.request
-        req = urllib.request.Request(
-            f"{endpoint}/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            method="OPTIONS",
-        )
-        resp = urllib.request.urlopen(req, timeout=5)
-        cors_header = resp.headers.get("Access-Control-Allow-Origin", "")
-        if cors_header == "*":
+        import urllib.error
+
+        # CORS preflight should work without auth — try without first
+        for headers in [
+            {"Origin": "https://gatekeeper.test"},
+            {"Origin": "https://gatekeeper.test", "Authorization": f"Bearer {api_key}"},
+        ]:
+            try:
+                req = urllib.request.Request(
+                    f"{endpoint}/models", headers=headers, method="OPTIONS",
+                )
+                resp = urllib.request.urlopen(req, timeout=5)
+                break  # success
+            except urllib.error.HTTPError:
+                continue  # try with auth next
+        else:
+            return AuditFinding(
+                id="ACC-001", name="CORS Config", category="access",
+                severity="info", passed=True,
+                description="OPTIONS rejected — CORS preflight blocked (secure)",
+            )
+
+        cors_origin = resp.headers.get("Access-Control-Allow-Origin", "")
+        cors_creds = resp.headers.get("Access-Control-Allow-Credentials", "")
+
+        if cors_origin == "*" and cors_creds.lower() == "true":
+            return AuditFinding(
+                id="ACC-001",
+                name="CORS: Wildcard Origin + Credentials",
+                category="access",
+                severity="critical",
+                passed=False,
+                description="Any website can make authenticated requests from a browser",
+                detail="Access-Control-Allow-Origin: * with Allow-Credentials: true",
+                fix="Never use wildcard origin with credentials. Restrict to your origin:\n"
+                    "  Access-Control-Allow-Origin: https://your-app.com\n"
+                    "  Access-Control-Allow-Credentials: true",
+            )
+
+        if cors_origin == "*":
             return AuditFinding(
                 id="ACC-001",
                 name="CORS: Wildcard Origin (*)",
                 category="access",
-                severity="high",
+                severity="critical",
                 passed=False,
                 description="Any website can call your API from a browser",
                 detail="Access-Control-Allow-Origin: *",
@@ -278,8 +310,8 @@ def check_access_cors(endpoint: str, api_key: str) -> AuditFinding:
             )
         return AuditFinding(
             id="ACC-001", name="CORS Config", category="access",
-            severity="high", passed=True,
-            description=f"CORS restricted: {cors_header or '(not set — secure)'}",
+            severity="critical", passed=True,
+            description=f"CORS restricted: {cors_origin or '(not set — secure)'}",
         )
     except Exception as e:
         return AuditFinding(
@@ -709,7 +741,7 @@ def check_deploy_privileged(docker_compose_path: str) -> AuditFinding:
     if not os.path.isfile(docker_compose_path):
         return AuditFinding(
             id="DEP-002", name="Privileged Mode", category="deployment",
-            severity="critical", passed=True,
+            severity="info", passed=True,
             description="No docker-compose.yml found to check",
         )
 
@@ -924,25 +956,40 @@ def check_config_debug_mode(project_dir: str) -> AuditFinding:
 
 
 def check_secrets_key_strength(project_dir: str) -> AuditFinding:
-    """Check if API master key meets minimum complexity requirements."""
-    env_content = _read_file(project_dir, ".env")
-    if not env_content:
+    """Check if API master key meets minimum complexity requirements.
+
+    Checks .env AND config.yaml for master keys.
+    """
+    # Collect content from all relevant files
+    sources = {}
+    for fname in [".env", "config.yaml", "config.yml"]:
+        content = _read_file(project_dir, fname)
+        if content:
+            sources[fname] = content
+
+    if not sources:
         return AuditFinding(
             id="SEC-004", name="API Key Strength", category="secrets",
             severity="info", passed=True,
-            description="No .env file to check",
+            description="No .env or config files found to check",
         )
 
-    # Find master key
-    key_match = re.search(
-        r'(?:MASTER_KEY|LITELLM_MASTER_KEY|API_KEY)\s*=\s*["\']?(\S+)["\']?',
-        env_content, re.IGNORECASE,
-    )
+    # Find master key across all sources
+    key_match = None
+    source_file = "?"
+    for fname, content in sources.items():
+        key_match = re.search(
+            r'(?:MASTER_KEY|LITELLM_MASTER_KEY|API_KEY)\s*[=:]\s*["\']?(\S+)["\']?',
+            content, re.IGNORECASE,
+        )
+        if key_match:
+            source_file = fname
+            break
     if not key_match:
         return AuditFinding(
             id="SEC-004", name="API Key Strength", category="secrets",
             severity="medium", passed=True,
-            description="No master API key found to check",
+            description="No master key found in .env or config files",
         )
 
     key = key_match.group(1)
@@ -953,8 +1000,8 @@ def check_secrets_key_strength(project_dir: str) -> AuditFinding:
             category="secrets",
             severity="high",
             passed=False,
-            description=f"Master key is only {len(key)} chars — brute-forceable",
-            detail=f"Key length: {len(key)} (minimum recommended: 32)",
+            description=f"Master key in {source_file} is only {len(key)} chars — brute-forceable",
+            detail=f"File: {source_file}, key length: {len(key)} (minimum recommended: 32)",
             fix="Generate a strong key:\n"
                 "  openssl rand -hex 32\n"
                 "Or use a password manager to generate a 64-char random string.",
@@ -962,7 +1009,7 @@ def check_secrets_key_strength(project_dir: str) -> AuditFinding:
     return AuditFinding(
         id="SEC-004", name="API Key Strength", category="secrets",
         severity="high", passed=True,
-        description=f"Master key length: {len(key)} chars — adequate",
+        description=f"Master key in {source_file}: {len(key)} chars — adequate",
     )
 
 

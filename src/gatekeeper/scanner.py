@@ -64,70 +64,83 @@ class Auditor:
                 return path
         return os.path.join(self.project_dir, candidates[0])  # default for checks
 
-    def run_file_probes(self) -> list[AuditFinding]:
-        """Run all file-based probes."""
+    def _run_probe_list(self, probes: list, probe_args: dict, offset: int = 0,
+                        total: int = 0) -> list[AuditFinding]:
+        """Run a list of probes using a dispatch table for argument routing.
+
+        probe_args maps probe function -> args tuple. Probes not in the map
+        receive (self.project_dir,) by default for file probes, or raise for
+        network probes (all network probes MUST be in the map).
+        """
         results = []
-        docker_path = self.docker_compose or os.path.join(self.project_dir, "docker-compose.yml")
-        config_path = self.config_file or os.path.join(self.project_dir, "config.yaml")
-
-        for i, probe_fn in enumerate(FILE_PROBES):
-            fn_name = probe_fn.__name__
-
-            # Route appropriate probes
-            if "ports" in fn_name:
-                result = probe_fn(docker_path)
-            elif "deploy_" in fn_name:
-                result = probe_fn(docker_path)
-            elif "rate_limit" in fn_name:
-                result = probe_fn(self.project_dir)  # now takes project_dir
-            elif "resource" in fn_name:
-                result = probe_fn(docker_path)
+        for i, probe_fn in enumerate(probes):
+            if probe_fn in probe_args:
+                args = probe_args[probe_fn]
+            elif probe_args is self._NETWORK_ARGS:
+                raise TypeError(
+                    f"Network probe '{probe_fn.__name__}' has no entry in "
+                    f"_NETWORK_ARGS dispatch table. Add it to scanner.py."
+                )
             else:
-                result = probe_fn(self.project_dir)
+                args = (self.project_dir,)
 
+            result = probe_fn(*args)
             results.append(result)
             if self.verbose:
                 status = "PASS" if result.passed else "FAIL"
-                print(f"  [{i+1:2d}/{FILE_PROBE_COUNT}] {result.id} "
+                count = total if total else len(probes)
+                print(f"  [{offset + i + 1:2d}/{count}] {result.id} "
                       f"{result.name[:45]:<45s} {status}")
-
         return results
+
+    def run_file_probes(self) -> list[AuditFinding]:
+        """Run all file-based probes."""
+        docker_path = self.docker_compose or os.path.join(self.project_dir, "docker-compose.yml")
+
+        # Dispatch table: probe function -> arguments tuple
+        file_args = {}
+        for fn in FILE_PROBES:
+            name = fn.__name__
+            if "deploy_" in name or "ports" in name or "resource" in name:
+                file_args[fn] = (docker_path,)
+            elif "rate_limit" in name:
+                file_args[fn] = (self.project_dir,)
+            else:
+                file_args[fn] = (self.project_dir,)
+
+        return self._run_probe_list(FILE_PROBES, file_args, total=FILE_PROBE_COUNT)
 
     def run_network_probes(self) -> list[AuditFinding]:
         """Run all network-based probes."""
         if not self.endpoint:
             return []
 
-        results = []
-        docker_path = self.docker_compose or os.path.join(self.project_dir, "docker-compose.yml")
+        from .probes import (
+            check_access_cors,
+            check_access_no_auth,
+            check_access_model_permissions,
+            check_access_security_headers,
+            check_network_https,
+            check_network_tls_cert,
+            check_network_exposed_admin,
+        )
 
-        for i, probe_fn in enumerate(NETWORK_PROBES):
-            fn_name = probe_fn.__name__
+        # Dispatch table by function reference — rename-safe, order-safe
+        self._NETWORK_ARGS = {
+            check_access_cors: (self.endpoint, self.api_key),
+            check_access_no_auth: (self.endpoint,),
+            check_access_model_permissions: (self.endpoint, self.api_key),
+            check_access_security_headers: (self.endpoint,),
+            check_network_https: (self.endpoint,),
+            check_network_tls_cert: (self.endpoint,),
+            check_network_exposed_admin: (self.endpoint, self.api_key),
+        }
 
-            if "ports" in fn_name:
-                result = probe_fn(docker_path)
-            elif "no_auth" in fn_name:
-                result = probe_fn(self.endpoint)
-            elif "cors" in fn_name or "model_permissions" in fn_name:
-                result = probe_fn(self.endpoint, self.api_key)
-            elif "https" in fn_name or "security_headers" in fn_name or "tls_cert" in fn_name:
-                result = probe_fn(self.endpoint)
-            elif "exposed_admin" in fn_name:
-                result = probe_fn(self.endpoint, self.api_key)
-            else:
-                # Don't silently drop — crash with a clear message
-                raise TypeError(
-                    f"Network probe '{fn_name}' has no routing in scanner.py. "
-                    f"Add it to the if/elif chain in run_network_probes()."
-                )
-
-            results.append(result)
-            if self.verbose:
-                status = "PASS" if result.passed else "FAIL"
-                print(f"  [{FILE_PROBE_COUNT + i + 1:2d}/{FILE_PROBE_COUNT + NETWORK_PROBE_COUNT}] "
-                      f"{result.id} {result.name[:45]:<45s} {status}")
-
-        return results
+        return self._run_probe_list(
+            NETWORK_PROBES, self._NETWORK_ARGS,
+            offset=FILE_PROBE_COUNT,
+            total=FILE_PROBE_COUNT + NETWORK_PROBE_COUNT,
+        )
 
     def audit(self) -> list[AuditFinding]:
         """Run full audit — file checks + network checks if endpoint provided.
