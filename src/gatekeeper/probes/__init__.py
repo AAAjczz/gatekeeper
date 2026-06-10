@@ -79,8 +79,9 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
     managed_files = ["config.yaml", "config.yml", "docker-compose.yml",
                      "docker-compose.yaml", ".env.example"]
     # Patterns for real-looking API keys
+    # Exclude obvious placeholder prefixes
     real_key_patterns = [
-        r'sk-[a-zA-Z0-9\-_]{15,100}',             # OpenAI/DeepSeek style (project keys can be 80+)
+        r'sk-(?!your-|example|placeholder|xxx|demo|test-|generate|random|changeme|replace)[a-zA-Z0-9\-_]{15,100}',
         r'api_key\s*[:=]\s*["\'][a-zA-Z0-9\-_]{20,}["\']',  # literal key values
         r'password\s*[:=]\s*["\'](?!\$\{|\$)[^"\'$]{4,}["\']',  # plaintext pwd (not env ref)
     ]
