@@ -13,11 +13,40 @@ class Reporter:
         self.findings = findings
         self.summary = summary
 
+    @staticmethod
+    def _risk_default(finding: AuditFinding) -> tuple[str, str]:
+        """Get risk explanation and effort — check probe first, then knowledge base, then defaults."""
+        # 1. Probe set its own values
+        if finding.risk_what and finding.effort:
+            return finding.risk_what, finding.effort
+
+        # 2. Check centralized knowledge base
+        from .probes import RISK_KNOWLEDGE
+        kb = RISK_KNOWLEDGE.get(finding.id, {})
+        risk = finding.risk_what or kb.get("risk_what", "")
+        effort = finding.effort or kb.get("effort", "")
+
+        # 3. Fall back to severity-based defaults
+        risk_defaults = {
+            "critical": ("Immediate compromise possible -- full system access, "
+                         "data theft, or financial loss.", "Requires immediate attention"),
+            "high": ("Likely exploitable -- could lead to data exposure, "
+                     "abuse, or service disruption.", "Fix today"),
+            "medium": ("Increases attack surface -- makes other vulnerabilities "
+                       "easier to exploit.", "Fix this week"),
+            "low": ("Best-practice gap -- not directly exploitable but "
+                    "weakens overall security posture.", "Fix when convenient"),
+            "info": ("", ""),
+        }
+        r_default, e_default = risk_defaults.get(finding.severity, ("", ""))
+        return (risk or r_default, effort or e_default)
+
     def terminal(self):
-        """Print a formatted table to the terminal."""
+        """Print a formatted table to the terminal with risk analysis."""
         from rich.console import Console
         from rich.table import Table
         from rich.panel import Panel
+        from rich.text import Text
 
         console = Console()
 
@@ -48,23 +77,38 @@ class Reporter:
         console.print(f"  [dim]{self.summary['note']}[/dim]")
         console.print()
 
-        # Failed by severity
-        if self.summary["failed_by_severity"]:
-            sev_table = Table(title="Failed by Severity")
-            sev_table.add_column("Severity", style="bold")
-            sev_table.add_column("Count", justify="right")
-            severity_colors = {
-                "critical": "red", "high": "red3",
-                "medium": "yellow", "low": "dim", "info": "dim",
-            }
-            for sev in ("critical", "high", "medium", "low", "info"):
-                count = self.summary["failed_by_severity"].get(sev, 0)
-                if count > 0:
-                    sev_table.add_row(
-                        f"[{severity_colors.get(sev, '')}]{sev.upper()}[/{severity_colors.get(sev, '')}]",
-                        str(count),
-                    )
-            console.print(sev_table)
+        # ================================================================
+        # PRIORITY ACTION PLAN — failed findings ranked by risk
+        # ================================================================
+        failed = [f for f in self.findings if not f.passed]
+        if failed:
+            # Sort: critical > high > medium > low > info
+            sev_order = {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}
+            failed_sorted = sorted(failed, key=lambda f: sev_order.get(f.severity, 0), reverse=True)
+
+            priority_table = Table(
+                title="Priority Action Plan -- Fix These First",
+                caption="Ordered by risk: what to fix, what happens if you don't, how long it takes.",
+            )
+            priority_table.add_column("#", style="dim")
+            priority_table.add_column("ID", style="bold")
+            priority_table.add_column("Issue")
+            priority_table.add_column("Severity")
+            priority_table.add_column("Effort")
+            priority_table.add_column("What Happens If Ignored")
+
+            sev_color_pri = {"critical": "red", "high": "red3", "medium": "yellow", "low": "dim", "info": "dim"}
+            for i, f in enumerate(failed_sorted, 1):
+                risk, effort = self._risk_default(f)
+                priority_table.add_row(
+                    str(i),
+                    f.id,
+                    f.name,
+                    f"[{sev_color_pri.get(f.severity, '')}]{f.severity.upper()}[/{sev_color_pri.get(f.severity, '')}]",
+                    effort,
+                    risk[:100] + ("..." if len(risk) > 100 else ""),
+                )
+            console.print(priority_table)
             console.print()
 
         # Category breakdown
@@ -81,35 +125,26 @@ class Reporter:
         console.print(cat_table)
         console.print()
 
-        # Detail table
-        detail_table = Table(title="Findings")
-        detail_table.add_column("ID", style="dim")
-        detail_table.add_column("Check")
-        detail_table.add_column("Severity")
-        detail_table.add_column("Result")
-
-        sev_color = {"critical": "red", "high": "red3", "medium": "yellow", "low": "dim", "info": "dim"}
-        for f in self.findings:
-            status = "[green]PASS[/green]" if f.passed else "[red]FAIL[/red]"
-            detail_table.add_row(
-                f.id,
-                f.name,
-                f"[{sev_color.get(f.severity, '')}]{f.severity.upper()}[/{sev_color.get(f.severity, '')}]",
-                status,
-            )
-        console.print(detail_table)
-
-        # Failed findings with fixes
-        failed = [f for f in self.findings if not f.passed]
+        # ================================================================
+        # PER-FINDING DETAIL — what it means + how to fix
+        # ================================================================
         if failed:
+            console.print(Text("Details & Fixes", style="bold underline"))
             console.print()
-            for f in failed:
-                console.print(f"[red]FAIL  {f.id} — {f.name}[/red]")
-                console.print(f"       {f.detail}")
+            for i, f in enumerate(failed_sorted, 1):
+                risk, effort = self._risk_default(f)
+
+                console.print(
+                    f"[red]> #{i}  {f.id} — {f.name}[/red]  "
+                    f"[dim]({f.severity.upper()} | {effort})[/dim]"
+                )
+                console.print(f"    [yellow]Risk:[/yellow] {risk}")
+                if f.detail:
+                    console.print(f"    [dim]Detail: {f.detail}[/dim]")
                 if f.fix:
-                    console.print(f"       [green]Fix:[/green]")
+                    console.print(f"    [green]How to fix:[/green]")
                     for line in f.fix.split("\n"):
-                        console.print(f"       [green]  {line}[/green]")
+                        console.print(f"      {line}")
                 console.print()
 
     def json(self, path: str):
@@ -127,6 +162,8 @@ class Reporter:
                     "description": f.description,
                     "detail": f.detail,
                     "fix": f.fix,
+                    "risk_what": f.risk_what,
+                    "effort": f.effort,
                 }
                 for f in self.findings
             ],

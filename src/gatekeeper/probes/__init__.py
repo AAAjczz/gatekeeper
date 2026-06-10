@@ -27,6 +27,9 @@ class AuditFinding:
     description: str
     detail: str = ""
     fix: str = ""
+    # New: built-in risk explanation — no AI needed
+    risk_what: str = ""   # plain-language: what could actually happen
+    effort: str = ""       # 5min / 15min / 30min / 1hr / requires_planning
 
 
 # ============================================================
@@ -95,6 +98,11 @@ def check_secrets_hardcoded_keys(project_dir: str) -> AuditFinding:
             fix="Replace hardcoded keys with env var references:\n"
                 "  api_key: ${DEEPSEEK_API_KEY}\n"
                 "Use .env for local values, but NEVER commit .env to git.",
+            risk_what="Anyone who can see your config file (teammates, logs, backups, "
+                      "or attackers who gain read access) gets full access to your "
+                      "AI provider account. They can run up charges, steal data, "
+                      "or get your account banned for abuse.",
+            effort="5min",
         )
 
     # Now check .env separately — warn if keys found AND .env isn't gitignored
@@ -160,6 +168,11 @@ def check_secrets_env_leak(project_dir: str) -> AuditFinding:
             description=".env files may be committed to git",
             detail="'.env' not found in .gitignore",
             fix="Add to .gitignore:\n  .env\n  .env.*\n  !.env.example",
+            risk_what="One accidental 'git add .' and your API keys are permanently "
+                      "in git history. Deleting the file later won't help — the keys "
+                      "stay in old commits forever. Anyone who clones your repo "
+                      "gets your keys.",
+            effort="1min",
         )
 
     if not has_env_wildcard:
@@ -1227,3 +1240,166 @@ NETWORK_PROBES = [
 FILE_PROBE_COUNT = len(FILE_PROBES)
 NETWORK_PROBE_COUNT = len(NETWORK_PROBES)
 TOTAL_PROBES = FILE_PROBE_COUNT + NETWORK_PROBE_COUNT
+
+
+# ============================================================
+# Risk Knowledge Base — plain-language explanations per probe
+# ============================================================
+# Probes set their own risk_what/effort if they want custom text.
+# Otherwise the reporter falls back to these defaults by probe ID.
+
+RISK_KNOWLEDGE = {
+    "SEC-001": {
+        "risk_what": "Anyone with access to your config files (teammates, CI logs, "
+                     "backups, or an attacker who gains read access) gets full control "
+                     "of your AI provider account. They can max out your billing, "
+                     "steal data, or get your account permanently banned.",
+        "effort": "5min",
+    },
+    "SEC-002": {
+        "risk_what": "One accidental 'git add .' and your API keys are permanently "
+                     "in git history. Even if you delete the file later, the keys "
+                     "remain in old commits forever. Anyone who clones your repo "
+                     "gets your keys.",
+        "effort": "1min",
+    },
+    "SEC-003": {
+        "risk_what": "Placeholder keys in active config files can be accidentally "
+                     "deployed to production. If the default key has any permissions, "
+                     "it gives attackers a free entry point.",
+        "effort": "5min",
+    },
+    "SEC-004": {
+        "risk_what": "Short API keys can be brute-forced. A 12-char key can be "
+                     "cracked in hours with modest hardware. Your AI bill, user data, "
+                     "and service reputation are on the other side of that key.",
+        "effort": "5min",
+    },
+    "SEC-005": {
+        "risk_what": "Keys that never rotate accumulate risk. Every day a key exists, "
+                     "the chance it has been silently compromised increases. "
+                     "Without a rotation policy, you won't know until the bill arrives.",
+        "effort": "30min",
+    },
+    "ACC-001": {
+        "risk_what": "Any website on the internet can make requests to your API "
+                     "from a visitor's browser. An attacker sets up a malicious page, "
+                     "a victim visits it, and their browser calls YOUR API using "
+                     "THEIR credentials.",
+        "effort": "5min",
+    },
+    "ACC-002": {
+        "risk_what": "Anyone who discovers your API URL can use it. No password, "
+                     "no key, nothing. Your AI provider bills you for every request. "
+                     "A single attacker can run up thousands of dollars overnight.",
+        "effort": "5min",
+    },
+    "ACC-003": {
+        "risk_what": "One API key unlocks every model. A user on your free tier "
+                     "can access your most expensive model. A compromised key gives "
+                     "attackers access to everything, not just what you intended.",
+        "effort": "15min",
+    },
+    "ACC-004": {
+        "risk_what": "Missing security headers make your API easier to attack via "
+                     "clickjacking, MIME sniffing, and XSS. Browsers use these "
+                     "headers to protect users — without them, the browser can't help.",
+        "effort": "5min",
+    },
+    "NET-001": {
+        "risk_what": "All API traffic is transmitted in plain text. Anyone on the "
+                     "same network (coffee shop WiFi, ISP, VPS provider) can read "
+                     "every request and response — including API keys, user prompts, "
+                     "and generated content.",
+        "effort": "30min",
+    },
+    "NET-002": {
+        "risk_what": "Your admin dashboard is on the public internet. If an attacker "
+                     "guesses or brute-forces the password, they get full control: "
+                     "create/delete keys, change models, view all usage data.",
+        "effort": "5min",
+    },
+    "NET-003": {
+        "risk_what": "Services bound to public interfaces are reachable from the "
+                     "internet. If a database or admin panel is accidentally exposed, "
+                     "attackers can connect directly, bypassing all application-level "
+                     "security.",
+        "effort": "5min",
+    },
+    "NET-004": {
+        "risk_what": "Expired or inconsistent certificates cause outages. Different "
+                     "CDN nodes with different certificates mean some users can "
+                     "connect while others get security errors. In the worst case, "
+                     "an expired certificate on one node blocks all traffic through "
+                     "that region.",
+        "effort": "15min",
+    },
+    "CFG-001": {
+        "risk_what": "Without rate limiting, one user or attacker can send unlimited "
+                     "requests. Your AI bill scales linearly with usage — a script "
+                     "running overnight can generate a five-figure charge. Rate "
+                     "limiting is your financial circuit breaker.",
+        "effort": "5min",
+    },
+    "CFG-002": {
+        "risk_what": "A memory leak or traffic spike can take down your entire VPS. "
+                     "Without resource limits, one container can consume all RAM, "
+                     "freezing SSH access and requiring a hard reboot.",
+        "effort": "5min",
+    },
+    "CFG-003": {
+        "risk_what": "Debug output in production logs exposes internal state: API "
+                     "keys in error messages, full request/response bodies, internal "
+                     "IP addresses. Anyone who can read your logs gets a map of your "
+                     "infrastructure.",
+        "effort": "1min",
+    },
+    "DEP-001": {
+        "risk_what": "If an attacker compromises your container, running as root "
+                     "means they get root on the host. With no-new-privileges "
+                     "(which you have), escalation is harder but lateral movement "
+                     "to other containers is still possible.",
+        "effort": "15min",
+    },
+    "DEP-002": {
+        "risk_what": "A privileged container has near-complete host access. "
+                     "Compromise of this container = compromise of the entire "
+                     "server. This is the Docker equivalent of running everything "
+                     "as root with no sandbox.",
+        "effort": "5min",
+    },
+    "DEP-003": {
+        "risk_what": "A compromised container can write malware, modify configs, "
+                     "or plant backdoors that survive container restart. Read-only "
+                     "rootfs prevents attackers from establishing persistence.",
+        "effort": "15min",
+    },
+    "DEP-004": {
+        "risk_what": ":latest tags change without warning. A new version can break "
+                     "your deployment silently, introduce security vulnerabilities, "
+                     "or change behavior in unexpected ways. You get the update "
+                     "whether you want it or not.",
+        "effort": "5min",
+    },
+    "DEP-005": {
+        "risk_what": "Without health checks, Docker doesn't know if your service "
+                     "is actually working. A hung process that still accepts "
+                     "connections looks 'healthy' — health checks catch the "
+                     "difference between 'running' and 'working'.",
+        "effort": "5min",
+    },
+    "DEP-006": {
+        "risk_what": "Without a restart policy, a crashed service stays dead until "
+                     "someone manually restarts it. At 3 AM on a Sunday, that means "
+                     "your API is down for hours.",
+        "effort": "1min",
+    },
+    "DEP-007": {
+        "risk_what": "This is the worst Docker misconfiguration. Mounting the "
+                     "Docker socket into a container gives that container full "
+                     "control over the host — start new privileged containers, "
+                     "escape to host, delete everything. Never do this.",
+        "effort": "1min",
+    },
+}
+
