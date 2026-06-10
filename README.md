@@ -9,7 +9,7 @@ Point it at your project directory. It finds the deployment mistakes that your m
 **Who it's for:** Developers running their own AI API gateway (LiteLLM, chinai-gateway, or any OpenAI-compatible endpoint). If you `docker compose up` an AI service, this is for you.
 
 ```bash
-pip install gatekeeper-ai
+pip install gatekeeper-audit
 gatekeeper audit -d /path/to/your-project
 ```
 
