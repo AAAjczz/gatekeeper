@@ -91,6 +91,8 @@ class Auditor:
                 result = probe_fn(self.endpoint)
             elif "exposed_admin" in fn_name:
                 result = probe_fn(self.endpoint, self.api_key)
+            elif "security_headers" in fn_name:
+                result = probe_fn(self.endpoint)
             else:
                 continue
 

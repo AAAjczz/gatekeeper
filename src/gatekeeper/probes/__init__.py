@@ -695,6 +695,254 @@ def check_deploy_readonly_rootfs(docker_compose_path: str) -> AuditFinding:
     )
 
 
+def check_deploy_image_pinning(docker_compose_path: str) -> AuditFinding:
+    """Check if Docker images use specific tags (not :latest)."""
+    if not os.path.isfile(docker_compose_path):
+        return AuditFinding(
+            id="DEP-004", name="Image Pinning", category="deployment",
+            severity="info", passed=True,
+            description="No docker-compose.yml found to check",
+        )
+
+    content = _read_file(os.path.dirname(docker_compose_path),
+                         os.path.basename(docker_compose_path))
+
+    # Find all image references
+    images = re.findall(r'image:\s*["\']?(\S+)["\']?', content)
+    latest_images = [img for img in images
+                     if img.endswith(":latest") or (":" not in img and "/" in img)]
+
+    if latest_images:
+        return AuditFinding(
+            id="DEP-004",
+            name="Unpinned Docker Images (:latest)",
+            category="deployment",
+            severity="medium",
+            passed=False,
+            description=f"{len(latest_images)} image(s) use floating tags — can break silently",
+            detail="Images: " + ", ".join(latest_images[:5]),
+            fix="Pin images to specific SHA or version tags:\n"
+                "  image: litellm:1.75.0  # not :latest\n"
+                "Consider using Dependabot or Renovate for automated updates.",
+        )
+    return AuditFinding(
+        id="DEP-004", name="Images Pinned", category="deployment",
+        severity="medium", passed=True,
+        description="All Docker images use specific version tags",
+    )
+
+
+def check_deploy_healthcheck(docker_compose_path: str) -> AuditFinding:
+    """Check if containers have health checks configured."""
+    if not os.path.isfile(docker_compose_path):
+        return AuditFinding(
+            id="DEP-005", name="Healthcheck", category="deployment",
+            severity="info", passed=True,
+            description="No docker-compose.yml found to check",
+        )
+
+    content = _read_file(os.path.dirname(docker_compose_path),
+                         os.path.basename(docker_compose_path))
+
+    # Count services and services with healthcheck
+    services = re.findall(r'^\s{2,}(\w+):', content, re.MULTILINE)
+    services_with_hc = set()
+
+    # Find healthcheck blocks and associate with nearest service above
+    # Simpler: check how many "healthcheck:" appear
+    hc_count = len(re.findall(r'healthcheck\s*:', content))
+
+    if hc_count == 0:
+        return AuditFinding(
+            id="DEP-005",
+            name="No Health Checks Configured",
+            category="deployment",
+            severity="medium",
+            passed=False,
+            description="No containers have health checks — downtime undetected",
+            fix="Add healthcheck to each service:\n"
+                "  healthcheck:\n"
+                "    test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:4000/health\"]\n"
+                "    interval: 30s\n"
+                "    retries: 3",
+        )
+    return AuditFinding(
+        id="DEP-005", name="Health Checks Configured", category="deployment",
+        severity="medium", passed=True,
+        description=f"{hc_count} healthcheck(s) found",
+    )
+
+
+def check_deploy_restart_policy(docker_compose_path: str) -> AuditFinding:
+    """Check if restart policy is set for all services."""
+    if not os.path.isfile(docker_compose_path):
+        return AuditFinding(
+            id="DEP-006", name="Restart Policy", category="deployment",
+            severity="info", passed=True,
+            description="No docker-compose.yml found to check",
+        )
+
+    content = _read_file(os.path.dirname(docker_compose_path),
+                         os.path.basename(docker_compose_path))
+
+    # Count services (top-level under 'services:' — indent of 2 spaces)
+    services = re.findall(r'^  (\w+):', content, re.MULTILINE)
+    # Filter out known non-service keys
+    service_names = [s for s in services if s not in
+                     ("environment", "volumes", "ports", "networks",
+                      "deploy", "healthcheck", "depends_on", "build",
+                      "security_opt", "command", "labels", "secrets",
+                      "configs", "cap_add", "cap_drop", "dns", "entrypoint",
+                      "extra_hosts", "logging", "tmpfs", "ulimits")]
+    # Count restart policies
+    restart_count = len(re.findall(r'restart\s*:', content))
+
+    if restart_count < len(service_names):
+        return AuditFinding(
+            id="DEP-006",
+            name="Missing Restart Policy",
+            category="deployment",
+            severity="medium",
+            passed=False,
+            description=f"Only {restart_count}/{len(service_names)} services have restart policy",
+            fix="Add to each service:\n"
+                "  restart: unless-stopped",
+        )
+    return AuditFinding(
+        id="DEP-006", name="Restart Policy Set", category="deployment",
+        severity="medium", passed=True,
+        description=f"All {len(service_names)} services have restart policies",
+    )
+
+
+def check_config_debug_mode(project_dir: str) -> AuditFinding:
+    """Check if debug/verbose mode is disabled in production config."""
+    debug_indicators = [
+        (r'set_verbose\s*:\s*true', "LiteLLM verbose mode enabled"),
+        (r'debug\s*:\s*true', "debug mode enabled"),
+        (r'LOG_LEVEL\s*=\s*["\']?(debug|trace)', "debug log level"),
+        (r'DEBUG\s*=\s*["\']?true', "DEBUG flag set"),
+        (r'NODE_ENV\s*=\s*["\']?development', "Node.js in development mode"),
+    ]
+
+    found = []
+    for fname in ["config.yaml", "config.yml", ".env", "docker-compose.yml"]:
+        content = _read_file(project_dir, fname)
+        if not content:
+            continue
+        for pattern, label in debug_indicators:
+            if re.search(pattern, content, re.IGNORECASE):
+                found.append(f"  {fname}: {label}")
+
+    if found:
+        return AuditFinding(
+            id="CFG-003",
+            name="Debug/Verbose Mode in Config",
+            category="config",
+            severity="high",
+            passed=False,
+            description=f"{len(found)} debug/verbose settings found — leaks info in production",
+            detail="\n".join(found[:5]),
+            fix="Disable in production:\n"
+                "  LiteLLM: set_verbose: false\n"
+                "  .env: LOG_LEVEL=warn or error",
+        )
+    return AuditFinding(
+        id="CFG-003", name="Debug Mode Disabled", category="config",
+        severity="high", passed=True,
+        description="No debug/verbose settings detected in production config",
+    )
+
+
+def check_secrets_key_strength(project_dir: str) -> AuditFinding:
+    """Check if API master key meets minimum complexity requirements."""
+    env_content = _read_file(project_dir, ".env")
+    if not env_content:
+        return AuditFinding(
+            id="SEC-004", name="API Key Strength", category="secrets",
+            severity="info", passed=True,
+            description="No .env file to check",
+        )
+
+    # Find master key
+    key_match = re.search(
+        r'(?:MASTER_KEY|LITELLM_MASTER_KEY|API_KEY)\s*=\s*["\']?(\S+)["\']?',
+        env_content, re.IGNORECASE,
+    )
+    if not key_match:
+        return AuditFinding(
+            id="SEC-004", name="API Key Strength", category="secrets",
+            severity="medium", passed=True,
+            description="No master API key found to check",
+        )
+
+    key = key_match.group(1)
+    if len(key) < 16:
+        return AuditFinding(
+            id="SEC-004",
+            name="Weak API Master Key",
+            category="secrets",
+            severity="high",
+            passed=False,
+            description=f"Master key is only {len(key)} chars — brute-forceable",
+            detail=f"Key length: {len(key)} (minimum recommended: 32+)",
+            fix="Generate a strong key:\n"
+                "  openssl rand -hex 32\n"
+                "Or use a password manager to generate a 64-char random string.",
+        )
+    return AuditFinding(
+        id="SEC-004", name="API Key Strength", category="secrets",
+        severity="high", passed=True,
+        description=f"Master key length: {len(key)} chars — adequate",
+    )
+
+
+def check_access_security_headers(endpoint: str) -> AuditFinding:
+    """Check for security-related HTTP headers on the API endpoint."""
+    security_headers = {
+        "Strict-Transport-Security": "HSTS (prevents SSL stripping)",
+        "X-Content-Type-Options": "MIME sniffing protection",
+        "X-Frame-Options": "Clickjacking protection",
+        "Content-Security-Policy": "XSS protection",
+        "X-XSS-Protection": "Legacy XSS protection",
+    }
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{endpoint}/models", method="GET")
+        resp = urllib.request.urlopen(req, timeout=5)
+
+        missing = []
+        for header, description in security_headers.items():
+            if header not in resp.headers:
+                missing.append(f"  {header}: {description}")
+
+        if len(missing) >= 3:
+            return AuditFinding(
+                id="ACC-004",
+                name="Missing Security Headers",
+                category="access",
+                severity="medium",
+                passed=False,
+                description=f"{len(missing)}/{len(security_headers)} security headers missing",
+                detail="\n".join(missing),
+                fix="Add to Nginx config:\n"
+                    "  add_header Strict-Transport-Security \"max-age=31536000\" always;\n"
+                    "  add_header X-Content-Type-Options \"nosniff\" always;\n"
+                    "  add_header X-Frame-Options \"DENY\" always;",
+            )
+        return AuditFinding(
+            id="ACC-004", name="Security Headers", category="access",
+            severity="medium", passed=True,
+            description=f"Only {len(missing)}/{len(security_headers)} headers missing",
+        )
+    except Exception as e:
+        return AuditFinding(
+            id="ACC-004", name="Security Headers", category="access",
+            severity="info", passed=True,
+            description=f"Cannot verify headers (endpoint unreachable): {e}",
+        )
+
+
 # ============================================================
 # Probe registry
 # ============================================================
@@ -704,12 +952,17 @@ FILE_PROBES = [
     check_secrets_hardcoded_keys,
     check_secrets_env_leak,
     check_secrets_default_keys,
+    check_secrets_key_strength,
     check_network_ports,
     check_config_rate_limiting,
     check_config_resource_limits,
+    check_config_debug_mode,
     check_deploy_root_user,
     check_deploy_privileged,
     check_deploy_readonly_rootfs,
+    check_deploy_image_pinning,
+    check_deploy_healthcheck,
+    check_deploy_restart_policy,
 ]
 
 # Network-based probes (need endpoint + API key)
@@ -717,6 +970,7 @@ NETWORK_PROBES = [
     check_access_cors,
     check_access_no_auth,
     check_access_model_permissions,
+    check_access_security_headers,
     check_network_https,
     check_network_exposed_admin,
 ]
