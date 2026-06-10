@@ -976,15 +976,22 @@ def check_secrets_key_strength(project_dir: str) -> AuditFinding:
         )
 
     # Find master key across all sources
+    # Skip env var references like os.environ/X, ${X}, $X
     key_match = None
     source_file = "?"
     for fname, content in sources.items():
-        key_match = re.search(
+        for m in re.finditer(
             r'(?:MASTER_KEY|LITELLM_MASTER_KEY|API_KEY)\s*[=:]\s*["\']?(\S+)["\']?',
             content, re.IGNORECASE,
-        )
-        if key_match:
+        ):
+            val = m.group(1).strip('"\'')
+            # Skip env var references — these are not the actual key
+            if val.startswith("os.environ") or val.startswith("${") or val.startswith("$"):
+                continue
+            key_match = m
             source_file = fname
+            break
+        if key_match:
             break
     if not key_match:
         return AuditFinding(
