@@ -1,0 +1,32 @@
+[project]
+name = "gatekeeper-ai"
+version = "0.1.0"
+description = "LLM API security scanner — red team your AI endpoints in one command"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "AAAjczz", email = "gatekeeper@chinai.dev"}]
+keywords = ["llm", "security", "red-team", "prompt-injection", "api", "openai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Security",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0",
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+gatekeeper = "gatekeeper.cli:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
