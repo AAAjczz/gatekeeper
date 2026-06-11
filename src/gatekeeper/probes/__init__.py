@@ -1313,6 +1313,175 @@ def check_secrets_key_rotation(project_dir: str) -> AuditFinding:
     )
 
 
+def check_network_dangerous_methods(endpoint: str) -> AuditFinding:
+    """NET-005: Check if API accepts dangerous HTTP methods (PUT/DELETE/TRACE/OPTIONS).
+
+    Learned from: Let's Build A Web Server, Part 1 — raw HTTP method handling.
+    A well-configured API gateway should reject PUT/DELETE/TRACE on
+    chat completions endpoints.  OPTIONS is informative for CORS.
+    """
+    dangerous = {
+        "PUT": "Can create/replace resources — rarely needed on /chat/completions",
+        "DELETE": "Can delete resources — should never work on AI endpoints",
+        "TRACE": "Debug method — can leak auth headers in response body",
+        "OPTIONS": "CORS preflight — reveals allowed methods to attackers",
+    }
+    import urllib.request
+    accepted = []
+    for method, risk in dangerous.items():
+        try:
+            req = urllib.request.Request(
+                f"{endpoint}/models", method=method,
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            if resp.status < 500:
+                accepted.append(f"  {method} → {resp.status}: {risk}")
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                accepted.append(f"  {method} → {e.code}: {risk}")
+        except Exception:
+            pass
+
+    if len(accepted) >= 3:
+        return AuditFinding(
+            id="NET-005",
+            name="Dangerous HTTP Methods Accepted",
+            category="network",
+            severity="medium",
+            passed=False,
+            description=f"{len(accepted)}/{len(dangerous)} dangerous HTTP methods accepted",
+            detail="\n".join(accepted),
+            fix="Restrict HTTP methods in Nginx:\n"
+                "  if ($request_method !~ ^(GET|POST)$) {\n"
+                "    return 405;\n"
+                "  }",
+        )
+    return AuditFinding(
+        id="NET-005", name="HTTP Methods Restricted", category="network",
+        severity="medium", passed=True,
+        description=f"Only {len(accepted)}/{len(dangerous)} dangerous methods accepted",
+    )
+
+
+def check_network_hsts(endpoint: str) -> AuditFinding:
+    """NET-006: Deep HSTS check — verify Strict-Transport-Security configuration.
+
+    Learned from: Let's Build A Web Server, Part 1 — HTTP response anatomy.
+    ACC-004 does a basic presence check; this probes HSTS configuration quality.
+    """
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{endpoint}/models", method="GET")
+        resp = urllib.request.urlopen(req, timeout=5)
+        hsts = resp.headers.get("Strict-Transport-Security", "")
+
+        if not hsts:
+            return AuditFinding(
+                id="NET-006",
+                name="HSTS Not Configured",
+                category="network",
+                severity="high",
+                passed=False,
+                description="No Strict-Transport-Security header",
+                detail="Without HSTS, browsers can be tricked into connecting over "
+                       "HTTP instead of HTTPS via SSL stripping attacks. An attacker "
+                       "on the same network can downgrade connections and read all traffic.",
+                fix="Add to Nginx:\n"
+                    '  add_header Strict-Transport-Security "max-age=31536000; '
+                    'includeSubDomains; preload" always;',
+            )
+
+        issues = []
+        if "max-age" not in hsts:
+            issues.append("Missing max-age directive")
+        else:
+            import re
+            m = re.search(r"max-age=(\d+)", hsts)
+            if m and int(m.group(1)) < 31536000:
+                issues.append(f"max-age too short: {m.group(1)}s (recommend ≥31536000)")
+
+        if "includeSubDomains" not in hsts:
+            issues.append("Missing includeSubDomains")
+
+        if issues:
+            return AuditFinding(
+                id="NET-006",
+                name="HSTS Misconfigured",
+                category="network",
+                severity="medium",
+                passed=False,
+                description=f"HSTS present but {len(issues)} issue(s)",
+                detail=f"Current: {hsts}\n" + "\n".join(f"  - {i}" for i in issues),
+                fix='add_header Strict-Transport-Security "max-age=31536000; '
+                    'includeSubDomains; preload" always;',
+            )
+
+        return AuditFinding(
+            id="NET-006", name="HSTS Properly Configured", category="network",
+            severity="high", passed=True,
+            description=f"HSTS: max-age≥1yr, includeSubDomains present",
+        )
+    except Exception as e:
+        return AuditFinding(
+            id="NET-006", name="HSTS", category="network",
+            severity="info", passed=True,
+            description=f"Cannot verify HSTS (endpoint unreachable): {e}",
+        )
+
+
+def check_network_host_injection(endpoint: str) -> AuditFinding:
+    """NET-007: Check for Host header injection vulnerability.
+
+    Learned from: Let's Build A Web Server, Part 1 — the server sees Host as raw text.
+    If the API gateway trusts a spoofed Host header, attackers can poison caches,
+    bypass authentication, or redirect users to malicious content.
+    """
+    import urllib.request
+    tests = [
+        ("evil.com", "External host — may enable cache poisoning"),
+        ("127.0.0.1", "Loopback host — may bypass auth/ACL restrictions"),
+        ("internal-admin", "Internal hostname — may expose internal endpoints"),
+    ]
+    reflected = []
+    for fake_host, risk in tests:
+        try:
+            req = urllib.request.Request(
+                f"{endpoint}/models",
+                method="GET",
+                headers={"Host": fake_host},
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            # If server responds 200 with the fake host, it's accepting injection
+            body = resp.read().decode("utf-8", errors="ignore")[:500]
+            if fake_host in body or resp.status == 200:
+                reflected.append(f"  Host: {fake_host} → {resp.status}: {risk}")
+        except Exception:
+            pass
+
+    if reflected:
+        return AuditFinding(
+            id="NET-007",
+            name="Host Header Injection Possible",
+            category="network",
+            severity="medium",
+            passed=False,
+            description=f"{len(reflected)}/{len(tests)} spoofed Host headers accepted",
+            detail="Server accepted requests with fake Host headers:\n"
+                   + "\n".join(reflected)
+                   + "\n\nThis may enable cache poisoning, password reset hijacking, "
+                   "or authentication bypass depending on the gateway configuration.",
+            fix="Validate Host header in Nginx:\n"
+                '  if ($http_host !~* "^(api\\.your-domain\\.com)$") {\n'
+                "    return 400;\n"
+                "  }",
+        )
+    return AuditFinding(
+        id="NET-007", name="Host Header Validation", category="network",
+        severity="medium", passed=True,
+        description="Spoofed Host headers rejected or ignored",
+    )
+
+
 # ============================================================
 # Probe registry
 # ============================================================
@@ -1346,6 +1515,9 @@ NETWORK_PROBES = [
     check_network_https,
     check_network_tls_cert,
     check_network_exposed_admin,
+    check_network_dangerous_methods,
+    check_network_hsts,
+    check_network_host_injection,
 ]
 
 FILE_PROBE_COUNT = len(FILE_PROBES)
@@ -1444,6 +1616,27 @@ RISK_KNOWLEDGE = {
                      "an expired certificate on one node blocks all traffic through "
                      "that region.",
         "effort": "15min",
+    },
+    "NET-005": {
+        "risk_what": "Dangerous HTTP methods (PUT, DELETE, TRACE) open unintended "
+                     "operations on your API. TRACE can echo back auth headers. "
+                     "PUT/DELETE can modify or destroy data on misconfigured servers. "
+                     "In most AI APIs, only GET and POST should be allowed.",
+        "effort": "5min",
+    },
+    "NET-006": {
+        "risk_what": "Without HSTS, anyone on the same WiFi can use SSL stripping to "
+                     "downgrade HTTPS connections to HTTP. Your users think they're "
+                     "encrypted, but an attacker reads everything. HSTS tells browsers "
+                     "'always use HTTPS for this domain' and cannot be bypassed.",
+        "effort": "5min",
+    },
+    "NET-007": {
+        "risk_what": "If your API gateway trusts the Host header from clients, an "
+                     "attacker can send a spoofed Host value to poison caches, "
+                     "bypass IP-based ACLs (sending 'Host: 127.0.0.1'), or redirect "
+                     "users to malicious sites via password reset poisoning.",
+        "effort": "10min",
     },
     "CFG-001": {
         "risk_what": "Without rate limiting, one user or attacker can send unlimited "

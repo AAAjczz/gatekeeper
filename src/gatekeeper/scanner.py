@@ -123,6 +123,9 @@ class Auditor:
             check_network_https,
             check_network_tls_cert,
             check_network_exposed_admin,
+            check_network_dangerous_methods,
+            check_network_hsts,
+            check_network_host_injection,
         )
 
         # Dispatch table by function reference — rename-safe, order-safe
@@ -134,6 +137,9 @@ class Auditor:
             check_network_https: (self.endpoint,),
             check_network_tls_cert: (self.endpoint,),
             check_network_exposed_admin: (self.endpoint, self.api_key),
+            check_network_dangerous_methods: (self.endpoint,),
+            check_network_hsts: (self.endpoint,),
+            check_network_host_injection: (self.endpoint,),
         }
 
         return self._run_probe_list(
